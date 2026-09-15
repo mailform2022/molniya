@@ -9,7 +9,7 @@ import { useStore } from '../lib/store';
 /** CrowdSourceWizard (VTX) + BoardSubmissionWizard. */
 export function SubmitPage() {
   const loc = useLocation();
-  const pre = (loc.state as { info?: VtxInfo; rangeId?: string } | null) ?? {};
+  const pre = (loc.state as SubmitPrefill | null) ?? {};
   const [tab, setTab] = useState<'vtx' | 'board'>('vtx');
   return (
     <>
@@ -17,12 +17,25 @@ export function SubmitPage() {
         <button className={tab === 'vtx' ? '' : 'secondary'} onClick={() => setTab('vtx')}>Новый VTX</button>
         <button className={tab === 'board' ? '' : 'secondary'} onClick={() => setTab('board')}>Новый борт</button>
       </div>
-      {tab === 'vtx' ? <VtxSubmit info={pre.info} rangeId={pre.rangeId} /> : <BoardSubmit />}
+      {tab === 'vtx' ? <VtxSubmit pre={pre} /> : <BoardSubmit />}
     </>
   );
 }
 
-function VtxSubmit({ info, rangeId: preRange }: { info?: VtxInfo; rangeId?: string }) {
+/** Prefill passed from the VTX flow: parsed vtx_info, raw MSP/CLI exchange and the grid the user ended up with. */
+interface SubmitPrefill {
+  info?: VtxInfo | null;
+  rangeId?: string | null;
+  rawLog?: Array<{ t: number; dir: 'tx' | 'rx' | 'info'; text: string }>;
+  freqSource?: 'catalog' | 'vtx_info' | 'manual' | 'file';
+  freqTable?: number[][];
+  fcTarget?: string;
+  fcVersion?: string;
+}
+
+function VtxSubmit({ pre }: { pre: SubmitPrefill }) {
+  const info = pre.info ?? undefined;
+  const preRange = pre.rangeId ?? undefined;
   const { notify } = useStore();
   const ranges = useAsync(() => api<{ ranges: Array<{ id: string; name: string }> }>('/frequency-ranges'));
   const [step, setStep] = useState(0);
@@ -30,14 +43,21 @@ function VtxSubmit({ info, rangeId: preRange }: { info?: VtxInfo; rangeId?: stri
   const [manufacturer, setManufacturer] = useState('');
   const [rangeId, setRangeId] = useState(preRange ?? '');
   const [protocol, setProtocol] = useState(info?.protocol ?? 'smartaudio');
-  const [grid, setGrid] = useState(info ? chunk(info.freqTable, info.channels || 8).map((b) => b.join(' ')).join('\n') : '');
+  const [grid, setGrid] = useState(pre.freqTable?.length ? pre.freqTable.map((b) => b.join(' ')).join('\n') : info ? chunk(info.freqTable, info.channels || 8).map((b) => b.join(' ')).join('\n') : '');
   const [done, setDone] = useState(false);
   const table = grid.split('\n').map((l) => l.trim().split(/[\s,]+/).filter(Boolean).map(Number)).filter((b) => b.length);
   const flat = table.flat();
   const dup = new Set(flat).size !== flat.length;
 
   async function send() {
-    await api('/vtx-submissions', { method: 'POST', json: { name, manufacturer: manufacturer || undefined, rangeId: rangeId || undefined, protocol, freqTable: table, cliStatusHex: info?.rawStatus.map((b) => b.toString(16).padStart(2, '0')).join('') || undefined, parsedStatus: info ?? undefined } });
+    await api('/vtx-submissions', {
+      method: 'POST',
+      json: {
+        name, manufacturer: manufacturer || undefined, rangeId: rangeId || undefined, protocol, freqTable: table,
+        cliStatusHex: info?.rawStatus.map((b) => b.toString(16).padStart(2, '0')).join('') || undefined, parsedStatus: info ?? undefined,
+        rawLog: pre.rawLog ?? [], freqSource: pre.freqSource ?? 'manual', fcTarget: pre.fcTarget, fcVersion: pre.fcVersion
+      }
+    });
     setDone(true);
     notify('Отправлено на модерацию');
   }
@@ -46,7 +66,7 @@ function VtxSubmit({ info, rangeId: preRange }: { info?: VtxInfo; rangeId?: stri
     <>
       <Steps n={3} current={step} />
       {step === 0 && <Card title="1. Модель">
-        <Tip>Данные из AutoDetect уже подставлены, если вы пришли из мастера. Иначе заполните вручную по наклейке/документации.</Tip>
+        <Tip>Данные из AutoDetect уже подставлены, если вы пришли из мастера{pre.rawLog?.length ? ` (сырой обмен: ${pre.rawLog.length} записей — уйдёт модератору как доказательство)` : ''}. Иначе заполните вручную по наклейке/документации.</Tip>
         <label>Название</label><input value={name} onChange={(e) => setName(e.target.value)} />
         <label>Производитель</label><input value={manufacturer} onChange={(e) => setManufacturer(e.target.value)} />
         <label>Диапазон</label><select value={rangeId} onChange={(e) => setRangeId(e.target.value)}><option value="">—</option>{ranges.data?.ranges.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}</select>

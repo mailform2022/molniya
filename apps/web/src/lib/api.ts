@@ -35,7 +35,7 @@ export async function fingerprint(): Promise<string> {
 
 export class ApiError extends Error {
   constructor(public status: number, public body: Record<string, unknown>) {
-    super(String(body.error ?? body.message ?? status));
+    super(body.hint ? `${String(body.error ?? status)}: ${String(body.hint)}` : String(body.error ?? body.message ?? status));
   }
 }
 
@@ -63,6 +63,23 @@ export async function api<T = Record<string, unknown>>(path: string, init: Reque
   const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (!res.ok) throw new ApiError(res.status, data);
   return data as T;
+}
+
+/** multipart upload (files + fields); the browser sets the boundary itself. */
+export async function apiUpload<T = Record<string, unknown>>(path: string, form: FormData): Promise<T> {
+  const headers = new Headers();
+  headers.set('X-Session-Id', sessionId());
+  headers.set('X-Fingerprint', await fingerprint());
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  const res = await fetch(`${API_BASE}/api${path}`, { method: 'POST', headers, body: form, credentials: 'include' });
+  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!res.ok) throw new ApiError(res.status, data);
+  return data as T;
+}
+
+/** Absolute URL for binary API resources (images, firmware) rendered via <img>/<a>. */
+export function apiUrl(path: string): string {
+  return `${API_BASE}/api${path}`;
 }
 
 export function wsUrl(): string {

@@ -3,6 +3,7 @@ import { Card, Tip, useAsync } from '../components/ui';
 import { api } from '../lib/api';
 import { useFc } from '../lib/fc';
 import { useStore } from '../lib/store';
+import { TRUST_LABEL, canWrite, useWizard, type Trust } from '../lib/wizard';
 
 interface Preset { id: string; name: string; allowedTargets: string[]; inavVersion: string; firmwareId: string | null; diffId: string | null; vtxProfileId: string | null; options: Record<string, boolean> | null }
 interface Fw { id: string; kind: string; target: string; version: string; fileName: string }
@@ -31,6 +32,16 @@ export function AutoFlashPage() {
   async function runOnce() {
     if (!fc.client || !fc.info || !preset) return;
     setBusy(true);
+    // Trust + snapshot gate: same rule as the master wizard — nothing is written to an unverified board without a stored snapshot.
+    const trustRes = await api<{ trust: Trust }>(`/trust?fcTarget=${encodeURIComponent(fc.info.target)}&fcVersion=${encodeURIComponent(fc.info.version)}`).catch(() => ({ trust: 'unverified' as Trust }));
+    const wz = useWizard.getState();
+    const gate = canWrite({ trust: trustRes.trust, snapshot: wz.uid === fc.info.uid ? wz.snapshot : null });
+    if (!gate.ok) {
+      push(`[gate] ${TRUST_LABEL[trustRes.trust].text}: ${gate.why}`);
+      notify('Заблокировано: пройдите шаги «Борт» и «Снимок» в мастере');
+      setBusy(false);
+      return;
+    }
     const run = await api<{ run: { id: string } }>('/autoflash/runs', { method: 'POST', json: { presetId: preset.id, boardUid: fc.info.uid, fcTarget: fc.info.target, fromVersion: fc.info.version } });
     const entries: Array<{ level: 'info' | 'warn' | 'error'; step?: string; message: string }> = [];
     const step = (s: string, m: string, level: 'info' | 'warn' | 'error' = 'info') => { push(`[${s}] ${m}`); entries.push({ level, step: s, message: m }); };
@@ -45,9 +56,8 @@ export function AutoFlashPage() {
         const d = diffs.data?.diffs.find((x) => x.id === preset.diffId);
         if (d) {
           step('diff', `применяем ${d.name} (${d.content.split('\n').length} строк)`);
-          const lines = d.content.split(/\r?\n/).filter((l) => l.trim() && !l.startsWith('#') && l.trim() !== 'save');
-          for (const l of lines) await fc.client.cli(l, 800).catch((e: Error) => step('diff', `${l}: ${e.message}`, 'warn'));
-          await fc.client.cli('save', 3000).catch(() => undefined);
+          await fc.runCliScript(d.content.split(/\r?\n/), 'save', (l, out) => { if (/error|invalid|unknown/i.test(out)) step('diff', `${l}: ${out.trim()}`, 'warn'); });
+          step('diff', 'save → перезагрузка, переподключено');
           await api('/diffs/usage', { method: 'POST', json: { diffId: d.id, action: 'applied' } });
         }
       }

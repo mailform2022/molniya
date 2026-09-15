@@ -13,8 +13,10 @@ import { HomePage } from './pages/Home';
 import { NewsPage } from './pages/News';
 import { SubmitPage } from './pages/Submit';
 import { VtxWizardPage } from './pages/VtxWizard';
+import { WizardPage } from './pages/Wizard';
 
 const NAV = [
+  ['/wizard', 'Мастер'],
   ['/connect', 'Борт'],
   ['/vtx', 'VTX'],
   ['/autoflash', 'Прошивка'],
@@ -79,6 +81,7 @@ export function App() {
           <Route path="/" element={<HomePage />} />
           <Route path="/auth" element={<AuthPage />} />
           <Route path="/connect" element={<ConnectPage />} />
+          <Route path="/wizard" element={<Protected><WizardPage /></Protected>} />
           <Route path="/vtx" element={<Protected><VtxWizardPage /></Protected>} />
           <Route path="/autoflash" element={<Protected><AutoFlashPage /></Protected>} />
           <Route path="/diff" element={<Protected><DiffPage /></Protected>} />

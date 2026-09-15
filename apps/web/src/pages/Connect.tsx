@@ -49,8 +49,8 @@ export function ConnectPage() {
         {fc.info && (
           <div className="row" style={{ marginTop: 12 }}>
             {user && <button onClick={() => void registerBoard()}>Сохранить в кабинет</button>}
-            <Link className="btn secondary" to="/vtx">AutoDetect VTX →</Link>
-            <Link className="btn secondary" to="/autoflash">AutoFlash →</Link>
+            <Link className="btn" to="/wizard">Мастер: снимок → diff → прошивка → VTX → пульт →</Link>
+            <Link className="btn secondary" to="/vtx">Только AutoDetect VTX →</Link>
           </div>
         )}
       </Card>
