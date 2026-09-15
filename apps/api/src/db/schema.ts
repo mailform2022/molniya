@@ -53,7 +53,7 @@ export const plans = pgTable('plans', {
   code: varchar('code', { length: 32 }).notNull().unique(), // BASE
   name: varchar('name', { length: 64 }).notNull(),
   durationDays: integer('duration_days').notNull().default(30),
-  deviceLimit: integer('device_limit').notNull().default(3),
+  deviceLimit: integer('device_limit').notNull().default(1),
   priceRub: integer('price_rub').notNull().default(0),
   features: jsonb('features').$type<Record<string, boolean | number | string>>().notNull().default({}),
   isActive: boolean('is_active').notNull().default(true),
@@ -81,7 +81,7 @@ export const subscriptions = pgTable(
     source: varchar('source', { length: 16 }).notNull(), // code | payment | manual | trial
     startsAt: timestamp('starts_at', { withTimezone: true }).notNull().defaultNow(),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-    deviceLimit: integer('device_limit').notNull().default(3),
+    deviceLimit: integer('device_limit').notNull().default(1),
     createdAt: createdAt()
   },
   (t) => [index('subs_user_idx').on(t.userId)]

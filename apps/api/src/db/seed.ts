@@ -9,13 +9,13 @@ import { analyzeDiff } from '../lib/diff.js';
 export async function seed(db: Db): Promise<void> {
   await db
     .insert(schema.plans)
-    .values({ code: 'BASE', name: 'Base', durationDays: 30, deviceLimit: 3, priceRub: 0, features: { boards_unlimited: true, configurator: true, autoflash: true, diff: true, emulators: true } })
-    .onConflictDoNothing();
+    .values({ code: 'BASE', name: 'Base', durationDays: 30, deviceLimit: 1, priceRub: 0, features: { boards_unlimited: true, configurator: true, autoflash: true, diff: true, emulators: true } })
+    .onConflictDoUpdate({ target: schema.plans.code, set: { durationDays: 30, deviceLimit: 1 } });
 
   await db
     .insert(schema.planAddons)
     .values([
-      { code: 'extra_device', name: '+1 пульт', kind: 'extra_device', amount: 1, priceRub: 0 },
+      { code: 'extra_device', name: '+1 пульт (докупается отдельно)', kind: 'extra_device', amount: 1, priceRub: 0 },
       { code: 'extra_time', name: '+30 дней', kind: 'extra_time', amount: 30, priceRub: 0 }
     ])
     .onConflictDoNothing();

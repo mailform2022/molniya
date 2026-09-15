@@ -15,6 +15,13 @@
       "when": 1789466678169,
       "tag": "0001_snapshots_diagnostics",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789468820936,
+      "tag": "0002_base_plan_one_transmitter",
+      "breakpoints": true
     }
   ]
 }

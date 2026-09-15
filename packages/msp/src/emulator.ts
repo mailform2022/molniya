@@ -46,7 +46,7 @@ export function defaultEmulatedFc(preset: EmulatorPreset = 'molniya'): EmulatedF
           { band: 1, channel: 3, freqMhz: 3390, rcChannel: 8, rcLevel: 2000 }
         ]
       : [],
-    auth: { authorized: false, plan: '', expiresAt: 0, deviceLimit: 3, devicesUsed: 0 },
+    auth: { authorized: false, plan: '', expiresAt: 0, deviceLimit: 1, devicesUsed: 0 },
     rc: Array.from({ length: 16 }, () => 1500),
     flash: molniya ? { supported: true, totalSize: 16 * 1024 * 1024, usedSize: 0 } : { supported: false, totalSize: 0, usedSize: 0 },
     sdcard: molniya ? { supported: false, state: 0, totalSizeKb: 0 } : { supported: true, state: 0, totalSizeKb: 0 },

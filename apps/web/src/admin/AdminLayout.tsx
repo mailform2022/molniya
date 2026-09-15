@@ -123,7 +123,7 @@ function Users() {
   async function grant(id: string) {
     const days = Number(prompt('Дней подписки BASE', '30'));
     if (!days) return;
-    await api(`/admin/users/${id}/subscription`, { method: 'POST', json: { planCode: 'BASE', days, deviceLimit: 3 } });
+    await api(`/admin/users/${id}/subscription`, { method: 'POST', json: { planCode: 'BASE', days, deviceLimit: 1 } });
     notify('Подписка выдана');
   }
   return (
@@ -155,7 +155,7 @@ function Plans() {
 
 function Codes() {
   const list = useAsync(() => api<{ codes: Array<{ id: string; code: string; type: string; planCode: string; durationDays: number; deviceLimit: number; redemptions: number; maxRedemptions: number; isRevoked: boolean; note: string | null }>; stats: { total: number; redeemed: number } }>('/admin/codes'));
-  const [form, setForm] = useState({ type: 'ACT', planCode: 'BASE', durationDays: 30, deviceLimit: 3, count: 1, note: '' });
+  const [form, setForm] = useState({ type: 'ACT', planCode: 'BASE', durationDays: 30, deviceLimit: 1, count: 1, note: '' });
   const [out, setOut] = useState<Array<{ code: string; encoderForm: string }>>([]);
   async function gen() {
     const r = await api<{ codes: Array<{ code: string; encoderForm: string }> }>('/admin/codes', { method: 'POST', json: { ...form, note: form.note || undefined } });
