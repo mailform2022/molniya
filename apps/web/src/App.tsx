@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { AccessBar, InstallPwaButton, Toast } from './components/ui';
 import { useStore } from './lib/store';
+import { useFc } from './lib/fc';
 import { AdminLayout } from './admin/AdminLayout';
 import { AccountPage } from './pages/Account';
 import { AuthPage } from './pages/Auth';
@@ -34,6 +35,21 @@ function Protected({ children }: { children: JSX.Element }) {
   return user ? children : <Navigate to="/auth" state={{ from: loc.pathname }} replace />;
 }
 
+/** Board link status + a one-click release of the COM port so an external configurator can take it. */
+function FcBadge() {
+  const { client, info, emulated, link, disconnect } = useFc();
+  if (!client) return null;
+  const label = emulated ? 'эмулятор' : link === 'ready' ? 'на связи' : link === 'connecting' ? 'переподключение…' : 'порт закрыт';
+  return (
+    <span className={`badge ${link === 'ready' ? 'ok' : 'warn'}`} title={info ? `${info.target} ${info.version} · UID ${info.uid}` : ''}>
+      Борт {info?.target ?? ''} · {label}{' '}
+      <button className="secondary" style={{ padding: '0 6px', marginLeft: 4 }} onClick={() => void disconnect()} title="Освободить COM-порт (для INAV Configurator и т.п.)">
+        Отключить
+      </button>
+    </span>
+  );
+}
+
 export function App() {
   const { init, user, config, presence, sessionRole } = useStore();
   useEffect(() => {
@@ -62,6 +78,7 @@ export function App() {
           <img src="/favicon.svg" width={24} height={24} alt="" /> VTX Services
         </NavLink>
         {user && <AccessBar />}
+        {user && <FcBadge />}
         {user && presence.length > 1 && (
           <span className="badge" title={presence.map((p) => `${p.role} · ${p.device ?? ''}`).join('\n')}>
             {presence.length} сессии · вы {sessionRole}

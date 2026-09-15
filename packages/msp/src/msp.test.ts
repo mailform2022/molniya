@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { crc8DvbS2Buf, encodeV2, MspParser } from './codec.js';
 import { MspClient } from './client.js';
 import { EmulatedFc } from './emulator.js';
+import { LoopbackTransport } from './transport.js';
 import { parseVtxInfo, validateFreqTable } from './vtxinfo.js';
 
 test('crc8 dvb-s2 known vector', () => {
@@ -102,4 +103,26 @@ test('blackbox container parser: headers, multiple logs, clean end detection', a
   assert.equal(res.logs[0]!.logRateHz, 500);
   assert.equal(res.logs[0]!.board, 'SBF4 SPEEDYBEEF405WING');
   assert.ok(res.warnings.some((w) => /#2/.test(w)));
+});
+
+test('MSP_VTX_CONFIG: short answers from stock INAV (no VTX device) do not throw', async () => {
+  // INAV replies with a single byte VTXDEV_UNKNOWN when nothing is configured; older builds may send 0 or 5 bytes.
+  for (const payload of [new Uint8Array(0), new Uint8Array([0xff]), new Uint8Array([4, 1, 1, 3, 0])]) {
+    // MSP v1 reply frame for VTX_CONFIG (0x58) with the given body
+    const t = new LoopbackTransport(() => {
+      const f = new Uint8Array(5 + payload.length + 1);
+      f.set([0x24, 0x4d, 0x3e, payload.length, 0x58]);
+      f.set(payload, 5);
+      f[f.length - 1] = f.subarray(3, f.length - 1).reduce((c, b) => c ^ b, 0);
+      return f;
+    });
+    const c = new MspClient(t, { timeoutMs: 200, retries: 1 });
+    await c.open();
+    const cfg = await c.vtxConfig();
+    assert.equal(typeof cfg.deviceType, 'number');
+    assert.equal(cfg.freqMhz, 0);
+    if (payload.length === 1) assert.equal(cfg.deviceType, 0xff);
+    if (payload.length === 5) assert.deepEqual([cfg.deviceType, cfg.band, cfg.channel, cfg.power, cfg.pitMode], [4, 1, 1, 3, 0]);
+    await c.close();
+  }
 });

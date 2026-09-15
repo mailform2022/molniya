@@ -152,7 +152,8 @@ export async function takeFcSnapshot(client: MspClient, onStep?: (text: string) 
       step(name);
       return await fn();
     } catch (e) {
-      step(`${name}: ${(e as Error).message}`);
+      const msg = (e as Error).message;
+      step(/rejected|unsupported/i.test(msg) ? `${name}: прошивка не знает эту команду (обычная INAV без VTX map) — пропускаем` : `${name}: ${msg}`);
       return null;
     }
   };
@@ -167,7 +168,7 @@ export async function takeFcSnapshot(client: MspClient, onStep?: (text: string) 
   let diffError: string | null = null;
   let statusText: string | null = null;
   try {
-    step('CLI: status, diff all');
+    step('CLI: status, diff all (после выхода из CLI INAV перезагрузит борт — это нормально)');
     const s = await client.cliSession();
     try {
       statusText = await s.run('status', 3000);

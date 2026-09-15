@@ -141,14 +141,20 @@ export class MspClient {
   }
 
   async vtxConfig(): Promise<{ deviceType: number; band: number; channel: number; power: number; pitMode: number; freqMhz: number }> {
+    // INAV answers with a single byte (VTXDEV_UNKNOWN=0xff) when no VTX device is configured/detected.
     const r = new PayloadReader((await this.request(MSP.VTX_CONFIG)).payload);
-    const deviceType = r.u8();
-    const band = r.u8();
-    const channel = r.u8();
-    const power = r.u8();
-    const pitMode = r.u8();
+    const deviceType = r.remaining ? r.u8() : 0xff;
+    const band = r.remaining ? r.u8() : 0;
+    const channel = r.remaining ? r.u8() : 0;
+    const power = r.remaining ? r.u8() : 0;
+    const pitMode = r.remaining ? r.u8() : 0;
     const freqMhz = r.remaining >= 2 ? r.u16() : 0;
     return { deviceType, band, channel, power, pitMode, freqMhz };
+  }
+
+  /** MSP_SET_VTX_CONFIG with the band/channel word above VTXCOMMON_MSP_BANDCHAN_CHKVAL, so only power (and pit mode) change. */
+  async setVtxPower(powerIndex: number, pitMode: number): Promise<void> {
+    await this.request(MSP.SET_VTX_CONFIG, new PayloadWriter().u16(0xffff).u8(powerIndex).u8(pitMode).build(), 1500);
   }
 
   async inavMisc(): Promise<Uint8Array> {

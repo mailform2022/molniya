@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { parseDiff, takeFcSnapshot, type FcSnapshot } from '@vtx/msp';
 import { Card, Steps, Tip, useAsync } from '../components/ui';
+import { ArmRelayEditor, OsdZonesEditor } from '../components/DiffBuilders';
 import { api, apiDownload, apiUpload, ApiError } from '../lib/api';
 import { connectivityHint, useFc, webSerialSupported } from '../lib/fc';
 import { useStore } from '../lib/store';
@@ -130,10 +131,6 @@ export function StepSnapshot() {
       setProgress(['Проверка связи с бортом…']);
       const client = await fc.ensureLink();
       const snap = await takeFcSnapshot(client, (t) => setProgress((p) => [...p, t]));
-      if (!fc.emulated) {
-        setProgress((p) => [...p, 'CLI exit → борт перезагружается, переподключение…']);
-        await fc.reconnectAfterReboot();
-      }
       setLocal(snap);
       const r = await api<{ snapshot: { id: string; diffSha256: string | null }; trust: Trust }>('/snapshots', {
         method: 'POST',
@@ -146,6 +143,15 @@ export function StepSnapshot() {
       w.patch({ trust: r.trust, snapshot: { id: r.snapshot.id, uid: snap.uid, target: snap.target, version: snap.version, trust: r.trust, takenAt: snap.takenAt, diffSha256: r.snapshot.diffSha256, local: snap } });
       setProgress((p) => [...p, `Сохранено на сервере: ${r.snapshot.id}`]);
       notify('Снимок борта сохранён');
+      if (!fc.emulated && snap.diffAll) {
+        setProgress((p) => [...p, 'Борт перезагружается после CLI, ждём USB…']);
+        try {
+          await fc.reconnectAfterReboot();
+          setProgress((p) => [...p, 'Связь с бортом восстановлена']);
+        } catch (e) {
+          setProgress((p) => [...p, `Снимок сохранён, но борт не вернулся на связь: ${(e as Error).message}`]);
+        }
+      }
     } catch (e) {
       setProgress((p) => [...p, `Ошибка: ${(e as Error).message}`]);
     } finally {
@@ -207,9 +213,7 @@ export function StepSnapshot() {
 // ---------------------------------------------------------------- 3. user diff + options with hints
 const OPTION_HINTS: Array<{ title: string; hint: string; lines: string }> = [
   { title: 'Увеличенный газ в круизе', hint: 'nav_fw_cruise_thr — газ автопилота (1000–2000). Больше — быстрее, но растёт ток и падает время полёта.', lines: 'set nav_fw_cruise_thr = 1500\nset nav_fw_max_thr = 1900' },
-  { title: 'Серва на конкретном выходе', hint: 'smix назначает вход (например, RC-канал) на выход сервы: smix <№> <серво> <источник> <вес> <скорость>. Источники: 0 стабилизированный roll … 38+ RC-каналы.', lines: 'smix 4 5 38 100 0' },
-  { title: 'Шторка/окно OSD', hint: 'osd_layout <лэйаут> <элемент> <x> <y> <V|H> — координаты элемента. Углы окна задаются позициями элементов; при переносе на другой дисплей значения меняются.', lines: 'osd_layout 0 15 12 1 V' },
-  { title: 'Реле взвода на RC-канале', hint: 'aux <слот> <режим> <RC-канал-4> <от> <до>: режим по уровню канала. Для 1700–2100 мкс диапазон 1700 2100.', lines: 'aux 5 0 3 1700 2100' }
+  { title: 'Серва на RC-канале (например, сброс)', hint: 'smix <правило> <servo> <источник> <вес> <скорость> <условие>. Источники RC: CH5=8, CH6=9, CH7=10, CH8=11, CH9=15 … CH16=22. Пин выхода = моторы + порядковый номер servo среди используемых (на Молнии servo 5 → S7 от CH10).', lines: 'servo 5 1000 2000 1500 100\nsmix 4 5 16 100 0 -1' }
 ];
 
 export function StepDiff({ gate }: { gate: { ok: boolean; why: string | null } }) {
@@ -265,6 +269,8 @@ export function StepDiff({ gate }: { gate: { ok: boolean; why: string | null } }
           {applyLog.length > 0 && <div className="log" style={{ marginTop: 8 }}>{applyLog.join('\n')}</div>}
         </div>
         <div>
+          <OsdZonesEditor baseDiff={w.snapshot?.local.diffAll ?? undefined} onAdd={(lines) => w.patch({ userDiff: `${w.userDiff.trimEnd()}\n${lines}\n`.trimStart(), userDiffApplied: false })} />
+          <ArmRelayEditor baseDiff={w.snapshot?.local.diffAll ?? undefined} onAdd={(lines) => w.patch({ userDiff: `${w.userDiff.trimEnd()}\n${lines}\n`.trimStart(), userDiffApplied: false })} />
           {OPTION_HINTS.map((h) => (
             <details key={h.title} style={{ marginBottom: 6 }}>
               <summary>{h.title}</summary>

@@ -81,6 +81,19 @@ async function adoptReenumeratedPort(t: WebSerialTransport): Promise<boolean> {
   return true;
 }
 
+/** Resolve when the OS reports the rebooted FC back (Web Serial `connect`), or after `ms`. */
+function waitForUsbReturn(ms: number): Promise<void> {
+  if (backend !== 'serial') return new Promise((r) => setTimeout(r, Math.min(ms, 2500)));
+  return new Promise((resolve) => {
+    const done = () => {
+      navigator.serial.removeEventListener('connect', done);
+      resolve();
+    };
+    navigator.serial.addEventListener('connect', done);
+    setTimeout(done, ms);
+  });
+}
+
 export const useFc = create<FcState>((set, get) => ({
   client: null,
   info: null,
@@ -137,11 +150,14 @@ export const useFc = create<FcState>((set, get) => ({
     if (!client || emulated) return;
     set({ link: 'connecting' });
     await client.close().catch(() => undefined);
+    // Windows: the CDC device disappears and comes back as a new SerialPort; wait for the OS event, then retry open ~20 s.
+    await waitForUsbReturn(6000);
+    await new Promise((r) => setTimeout(r, 800));
     let lastErr = '';
-    for (let attempt = 0; attempt < 10; attempt++) {
-      await new Promise((r) => setTimeout(r, attempt === 0 ? 2500 : 1000));
+    for (let attempt = 0; attempt < 16; attempt++) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, 1000));
       try {
-        if (attempt >= 3 && client.transport instanceof WebSerialTransport) await adoptReenumeratedPort(client.transport);
+        if (client.transport instanceof WebSerialTransport) await adoptReenumeratedPort(client.transport);
         await client.open();
         const fresh = await identify(client);
         if (info && fresh.uid !== info.uid) throw new Error(`после перезагрузки подключён другой борт (UID ${fresh.uid})`);
@@ -152,7 +168,7 @@ export const useFc = create<FcState>((set, get) => ({
         await client.close().catch(() => undefined);
       }
     }
-    set({ link: 'lost', error: `Борт перезагрузился, но не вернулся на связь: ${lastErr}. Переподключите USB и нажмите «Переподключить».` });
+    set({ link: 'lost', error: `Борт перезагрузился, но порт не открылся снова (${lastErr}). Обычно помогает: закрыть INAV Configurator/терминал, переподключить USB, нажать «Переподключить» — данные, снятые до перезагрузки, сохранены.` });
     throw new Error(lastErr);
   },
   async runCliScript(lines, end, onLine) {

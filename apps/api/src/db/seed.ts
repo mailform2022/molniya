@@ -4,6 +4,7 @@ import * as schema from './schema.js';
 import { hashPassword } from '../lib/crypto.js';
 import { env } from '../lib/env.js';
 import { analyzeDiff } from '../lib/diff.js';
+import { MOLNIYA_712_PRESET, MOLNIYA_712_PRESET_NAME, MOLNIYA_712_PRESET_VERSION } from '../presets/molniya_712.js';
 
 /** Idempotent seed: reference data required for the product to function. */
 export async function seed(db: Db): Promise<void> {
@@ -120,25 +121,15 @@ export async function seed(db: Db): Promise<void> {
   ];
   for (const [key, content] of cms) await db.insert(schema.cmsContent).values({ key, content }).onConflictDoNothing();
 
-  // Default diff template for Молния 2 (arming relay on S6/S9 via CH7 1700–2100).
-  const diffCount = await db.$count(schema.diffTemplates);
-  if (!diffCount && m2) {
-    const content = [
-      '# VTX Services — Молния 2 / CADDXF405_WING базовый diff',
-      'feature -AIRMODE',
-      'feature PWM_OUTPUT_ENABLE',
-      'set platform_type = AIRPLANE',
-      'set applied_defaults = 2',
-      'set vtx_band = 1',
-      'set vtx_channel = 1',
-      'set vtx_power = 1',
-      'set vtx_3g3_chan_freqfix = ON',
-      'logic 0 1 -1 1 1 6 0 1700 0',
-      'logic 1 1 -1 26 4 0 0 1 0',
-      'save'
-    ].join('\n');
-    const [t] = await db.insert(schema.diffTemplates).values({ name: 'Молния 2 — базовый', boardModelId: m2.id, isDefault: true, isPublic: true }).returning();
-    const [v] = await db.insert(schema.diffTemplateVersions).values({ templateId: t!.id, version: '1.0.0', content, changelog: 'initial', parsed: analyzeDiff(content) }).returning();
+  // Reference diff of the flown Молния board (MOLNIYAF405WING 7.1.2 @889d6f08) without vtxmap rules — the default template.
+  const [existingPreset] = await db.select().from(schema.diffTemplates).where(eq(schema.diffTemplates.name, MOLNIYA_712_PRESET_NAME));
+  if (!existingPreset && m2) {
+    await db.update(schema.diffTemplates).set({ isDefault: false }).where(eq(schema.diffTemplates.isDefault, true));
+    const [t] = await db.insert(schema.diffTemplates).values({ name: MOLNIYA_712_PRESET_NAME, boardModelId: m2.id, isDefault: true, isPublic: true }).returning();
+    const [v] = await db
+      .insert(schema.diffTemplateVersions)
+      .values({ templateId: t!.id, version: MOLNIYA_712_PRESET_VERSION, content: MOLNIYA_712_PRESET, changelog: 'diff all с летающей Молнии (INAV 7.1.2, 889d6f08); правила vtxmap убраны — задаются на шаге VTX', parsed: analyzeDiff(MOLNIYA_712_PRESET) })
+      .returning();
     await db.update(schema.diffTemplates).set({ currentVersionId: v!.id }).where(eq(schema.diffTemplates.id, t!.id));
     await db.update(schema.boardModels).set({ defaultDiffTemplateId: t!.id }).where(eq(schema.boardModels.id, m2.id));
   }

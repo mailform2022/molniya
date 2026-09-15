@@ -119,12 +119,15 @@ export class WebSerialTransport implements Transport {
   }
 
   async disconnect(): Promise<void> {
+    // On Windows a rebooting FC can leave cancel()/close() hanging; never let that block the caller.
+    const withTimeout = <T>(p: Promise<T> | undefined, ms: number) =>
+      Promise.race([p ?? Promise.resolve(undefined), new Promise<undefined>((r) => setTimeout(() => r(undefined), ms))]).catch(() => undefined);
     try {
       this.connected = false;
-      await this.reader?.cancel().catch(() => undefined);
-      await this.writer?.close().catch(() => undefined);
-      await this.readLoop;
-      await this.port?.close().catch(() => undefined);
+      await withTimeout(this.reader?.cancel(), 1500);
+      await withTimeout(this.writer?.close(), 1500);
+      await withTimeout(this.readLoop ?? undefined, 1500);
+      await withTimeout(this.port?.close(), 3000);
     } finally {
       this.connected = false;
       this.reader = null;

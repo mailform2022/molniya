@@ -1,7 +1,7 @@
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import { and, count, desc, eq, gte, sql } from 'drizzle-orm';
 import { createHash } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { authenticator } from 'otplib';
 import { z } from 'zod';
@@ -290,6 +290,31 @@ export const adminRoutes: FastifyPluginAsyncZod = async (app) => {
       return { success: true };
     }
   );
+
+  /**
+   * Hard delete of a catalog entry and its file. Refused while published or while anything that is flight evidence
+   * still points at it (diagnostic builds, crash-fix proposals, users' build sets): those rows are the trail behind
+   * every published build and must stay reconstructible. Feedback rows cascade.
+   */
+  app.delete('/firmware/:id', { schema: { params: uuid } }, async (req, reply) => {
+    const [fw] = await app.db.select().from(schema.firmwareVersions).where(eq(schema.firmwareVersions.id, req.params.id));
+    if (!fw) return reply.code(404).send({ success: false, error: 'not_found' });
+    if (fw.isPublished) return reply.code(409).send({ success: false, error: 'published', hint: 'Сначала снимите прошивку с публикации.' });
+    const [[db], [cf], [bs], [fp]] = await Promise.all([
+      app.db.select({ n: count() }).from(schema.diagnosticBuilds).where(eq(schema.diagnosticBuilds.baseFirmwareId, fw.id)),
+      app.db.select({ n: count() }).from(schema.crashReports).where(eq(schema.crashReports.fixFirmwareId, fw.id)),
+      app.db.select({ n: count() }).from(schema.buildSets).where(sql`${schema.buildSets.fcFirmwareId} = ${fw.id} or ${schema.buildSets.txFirmwareId} = ${fw.id}`),
+      app.db.select({ n: count() }).from(schema.flashPresets).where(eq(schema.flashPresets.firmwareId, fw.id))
+    ]);
+    const refs = { diagnosticBuilds: db?.n ?? 0, crashFixes: cf?.n ?? 0, buildSets: bs?.n ?? 0, presets: fp?.n ?? 0 };
+    if (Object.values(refs).some((n) => n > 0)) {
+      return reply.code(409).send({ success: false, error: 'in_use', refs, hint: `На прошивку ссылаются: диагностических сборок ${refs.diagnosticBuilds}, исправлений крэша ${refs.crashFixes}, комплектов ${refs.buildSets}, пресетов ${refs.presets}. Такую прошивку можно только отозвать (withdrawn).` });
+    }
+    await app.db.delete(schema.firmwareVersions).where(eq(schema.firmwareVersions.id, fw.id));
+    await unlink(fw.filePath).catch(() => undefined);
+    await app.audit(req, 'admin.firmware_delete', fw.id, { target: fw.target, version: fw.version, sha256: fw.sha256, fileName: fw.fileName });
+    return { success: true };
+  });
 
   // ---- /admin/firmware/:id/feedback + /admin/build-sets: flight evidence behind every published build ----
   app.get('/firmware/:id/feedback', { schema: { params: uuid } }, async (req) => ({

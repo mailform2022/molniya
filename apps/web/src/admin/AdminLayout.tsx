@@ -210,6 +210,10 @@ function Firmware() {
   async function patch(id: string, json: Record<string, unknown>) {
     try { await api(`/admin/firmware/${id}`, { method: 'PATCH', json }); list.reload(); } catch (e) { fail(e); }
   }
+  async function remove(f: FwRow) {
+    if (!window.confirm(`Удалить ${f.fileName} (${f.target} ${f.version})? Файл и запись будут удалены безвозвратно.`)) return;
+    try { await api(`/admin/firmware/${f.id}`, { method: 'DELETE' }); list.reload(); notify('Прошивка удалена'); } catch (e) { fail(e); }
+  }
   function setVerification(f: FwRow, verification: string) {
     if (verification === 'withdrawn') {
       const withdrawnReason = window.prompt('Причина отзыва прошивки (увидят пользователи):') ?? '';
@@ -245,7 +249,7 @@ function Firmware() {
         </div>
       </Card>
       <Card title="Прошивки">
-        <table><thead><tr><th>Тип</th><th>Target</th><th>Версия</th><th>Раздел</th><th>Файл</th><th>SHA-256</th><th>Проверка</th><th>Публ.</th></tr></thead>
+        <table><thead><tr><th>Тип</th><th>Target</th><th>Версия</th><th>Раздел</th><th>Файл</th><th>SHA-256</th><th>Проверка</th><th>Публ.</th><th></th></tr></thead>
           <tbody>{list.data?.firmware.map((f) => (
             <tr key={f.id} style={{ opacity: f.verification === 'withdrawn' ? 0.5 : 1 }}>
               <td>{f.kind}</td><td>{f.target}</td><td>{f.version}</td>
@@ -258,6 +262,7 @@ function Firmware() {
                 </select>
               </td>
               <td><input type="checkbox" style={{ width: 'auto' }} checked={f.isPublished} disabled={!f.isPublished && f.verification !== 'flight_tested'} onChange={(e) => void patch(f.id, { isPublished: e.target.checked })} /></td>
+              <td><button className="secondary" disabled={f.isPublished} title={f.isPublished ? 'Сначала снимите с публикации' : 'Удалить файл и запись'} onClick={() => void remove(f)}>Удалить</button></td>
             </tr>
           ))}</tbody></table>
       </Card>
