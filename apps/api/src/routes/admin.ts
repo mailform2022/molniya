@@ -242,6 +242,11 @@ export const adminRoutes: FastifyPluginAsyncZod = async (app) => {
         if (!req.body.withdrawnReason && !fw.withdrawnReason) return reply.code(400).send({ success: false, error: 'withdrawn_reason_required' });
         next.isPublished = false;
       }
+      if (next.verification === 'flight_tested' && fw.verification !== 'flight_tested') {
+        const [ok] = await app.db.select({ n: count() }).from(schema.firmwareFeedback).where(and(eq(schema.firmwareFeedback.firmwareId, fw.id), eq(schema.firmwareFeedback.outcome, 'flew_ok')));
+        const [crashOk] = next.fixesCrashReportId ? await app.db.select({ v: schema.crashReports.userVerdict }).from(schema.crashReports).where(eq(schema.crashReports.id, next.fixesCrashReportId)) : [];
+        if ((ok?.n ?? 0) === 0 && crashOk?.v !== 'ok') return reply.code(409).send({ success: false, error: 'no_flight_evidence', hint: 'Ни одного отзыва «отлетал нормально» по этой сборке и нет подтверждённого исправления крэша. Нельзя пометить как проверенную в полёте.' });
+      }
       if (next.isPublished && !fw.isPublished) {
         if (next.verification !== 'flight_tested') return reply.code(409).send({ success: false, error: 'not_flight_tested', hint: 'Публикация разрешена только для verification=flight_tested.' });
         if (next.fixesCrashReportId) {
@@ -257,6 +262,42 @@ export const adminRoutes: FastifyPluginAsyncZod = async (app) => {
       return { success: true };
     }
   );
+
+  // ---- /admin/firmware/:id/feedback + /admin/build-sets: flight evidence behind every published build ----
+  app.get('/firmware/:id/feedback', { schema: { params: uuid } }, async (req) => ({
+    success: true,
+    feedback: await app.db
+      .select({ f: schema.firmwareFeedback, email: schema.users.email })
+      .from(schema.firmwareFeedback)
+      .innerJoin(schema.users, eq(schema.users.id, schema.firmwareFeedback.userId))
+      .where(eq(schema.firmwareFeedback.firmwareId, req.params.id))
+      .orderBy(desc(schema.firmwareFeedback.createdAt))
+  }));
+  app.patch('/firmware-feedback/:id', { schema: { params: uuid, body: z.object({ adminNote: z.string().max(2000).nullable() }) } }, async (req, reply) => {
+    const [row] = await app.db.update(schema.firmwareFeedback).set({ adminNote: req.body.adminNote }).where(eq(schema.firmwareFeedback.id, req.params.id)).returning({ id: schema.firmwareFeedback.id });
+    if (!row) return reply.code(404).send({ success: false, error: 'not_found' });
+    await app.audit(req, 'admin.firmware_feedback_note', row.id);
+    return { success: true };
+  });
+  app.get('/build-sets', { schema: { querystring: z.object({ uid: z.string().max(64).optional(), userId: z.string().uuid().optional(), status: z.string().max(16).optional() }) } }, async (req) => {
+    const conds = [] as ReturnType<typeof eq>[];
+    if (req.query.uid) conds.push(eq(schema.buildSets.uid, req.query.uid.toLowerCase()));
+    if (req.query.userId) conds.push(eq(schema.buildSets.userId, req.query.userId));
+    if (req.query.status) conds.push(eq(schema.buildSets.status, req.query.status));
+    const rows = await app.db
+      .select({ id: schema.buildSets.id, userId: schema.buildSets.userId, email: schema.users.email, uid: schema.buildSets.uid, fcTarget: schema.buildSets.fcTarget, trust: schema.buildSets.trust, snapshotId: schema.buildSets.snapshotId, fcFirmwareId: schema.buildSets.fcFirmwareId, txFirmwareId: schema.buildSets.txFirmwareId, txModelCode: schema.buildSets.txModelCode, freqSource: schema.buildSets.freqSource, vtxModelName: schema.buildSets.vtxModelName, pairs: schema.buildSets.pairs, hashes: schema.buildSets.hashes, fcApplied: schema.buildSets.fcApplied, vtxMapWritten: schema.buildSets.vtxMapWritten, txApplied: schema.buildSets.txApplied, status: schema.buildSets.status, crashReportId: schema.buildSets.crashReportId, name: schema.buildSets.name, createdAt: schema.buildSets.createdAt })
+      .from(schema.buildSets)
+      .innerJoin(schema.users, eq(schema.users.id, schema.buildSets.userId))
+      .where(conds.length ? and(...conds) : undefined)
+      .orderBy(desc(schema.buildSets.createdAt))
+      .limit(200);
+    return { success: true, buildSets: rows };
+  });
+  app.get('/build-sets/:id', { schema: { params: uuid } }, async (req, reply) => {
+    const [row] = await app.db.select().from(schema.buildSets).where(eq(schema.buildSets.id, req.params.id));
+    if (!row) return reply.code(404).send({ success: false, error: 'not_found' });
+    return { success: true, buildSet: row };
+  });
 
   // ---- /admin/verified-targets: which FC target + INAV version are flight-verified ----
   const vtBody = z.object({ fcTarget: z.string().max(64), inavVersion: z.string().max(32), boardModelId: z.string().uuid().nullable().optional(), status: z.enum(['verified', 'experimental', 'banned']).default('verified'), evidence: z.string().max(2000).optional() });

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { parseDiff, takeFcSnapshot, type FcSnapshot, type VtxPair } from '@vtx/msp';
 import { Card, Steps, Tip, useAsync } from '../components/ui';
-import { api, apiUpload, apiUrl, ApiError } from '../lib/api';
+import { api, apiDownload, apiUpload, ApiError } from '../lib/api';
 import { useFc, webSerialSupported } from '../lib/fc';
 import { useStore } from '../lib/store';
 import { TRUST_LABEL, canWrite, snapshotRequired, useWizard, type DiagBuild, type Trust } from '../lib/wizard';
@@ -74,7 +74,7 @@ function StepConnect() {
       }
       const info = useFc.getState().info!;
       const t = await api<{ trust: Trust }>(`/trust?fcTarget=${encodeURIComponent(info.target)}&fcVersion=${encodeURIComponent(info.version)}`);
-      w.startFor(info.uid, t.trust);
+      w.startFor({ uid: info.uid, target: info.target, version: info.version }, t.trust);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -285,7 +285,7 @@ function StepDiff({ gate }: { gate: { ok: boolean; why: string | null } }) {
 function StepFirmware({ gate }: { gate: { ok: boolean; why: string | null } }) {
   const fc = useFc();
   const w = useWizard();
-  const { notify, access } = useStore();
+  const { notify } = useStore();
   const fw = useAsync(() => (fc.info ? api<{ firmware: Firmware[] }>(`/firmware?kind=fc&target=${encodeURIComponent(fc.info.target)}`) : Promise.resolve({ firmware: [] })), [fc.info?.target]);
   const cap = w.snapshot?.local.capability;
   const [logPath, setLogPath] = useState<DiagBuild['logPath']>(cap && cap.recommended !== 'none' ? cap.recommended : 'serial_host');
@@ -343,7 +343,7 @@ function StepFirmware({ gate }: { gate: { ok: boolean; why: string | null } }) {
       ))}
       {chosen && (
         <p>
-          {access?.type === 'none' ? <span className="warn">Скачивание прошивок доступно по тарифу (кабинет → тариф).</span> : <a className="btn secondary" href={apiUrl(`/firmware/${chosen.id}/download`)}>Скачать {chosen.fileName}</a>}
+          <FirmwareDownload fw={chosen} />
           {chosen.changelog && <span className="muted"> · {chosen.changelog}</span>}
         </p>
       )}
@@ -456,76 +456,111 @@ function TxScreen({ model, pairs }: { model: string; pairs: VtxPair[] }) {
   );
 }
 
-// ---------------------------------------------------------------- 7. artifacts
-function download(name: string, content: string, type = 'text/plain') {
-  const url = URL.createObjectURL(new Blob([content], { type }));
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+// ---------------------------------------------------------------- 7. artifacts (generated and stored server-side: POST /build-sets)
+/** Firmware file download goes through the API gate (trust/snapshot for FC, subscription for transmitter). */
+function FirmwareDownload({ fw }: { fw: Firmware }) {
+  const w = useWizard();
+  const [err, setErr] = useState<string | null>(null);
+  const q = fw.kind === 'fc' ? `?uid=${encodeURIComponent(w.uid ?? '')}&fcVersion=${encodeURIComponent(w.fcVersion ?? '')}` : '';
+  return (
+    <>
+      <button className="secondary" onClick={() => apiDownload(`/firmware/${fw.id}/download${q}`, fw.fileName).then(() => setErr(null), (e: Error) => setErr(e.message))}>Скачать {fw.fileName}</button>
+      {err && <span className="warn"> {err}</span>}
+    </>
+  );
 }
 
-/** EdgeTX model YAML fragment for VtxAuto v3.1 (struct VtxAutoData). value = percent of channel travel (±100 → ±1024). */
-function txYaml(pairs: VtxPair[], name: string): string {
-  const pct = (us: number) => Math.max(-100, Math.min(100, Math.round((us - 1500) / 5.12)));
-  const ch = (pairs[0]?.rcChannel ?? 9) - 1;
-  const lines = ['vtxAuto:', '  enabled: 1', '  activeProfile: 0', '  profileCount: 1', '  profiles:', '    0:', `      name: "${name.slice(0, 11)}"`, `      channel: ${ch}`, `      pairCount: ${pairs.length}`, '      mode: 0', '      timeType: 0', '      pairs:'];
-  pairs.forEach((p, i) => lines.push(`        ${i}:`, `          band: ${p.band - 1}`, `          channel: ${p.channel}`, `          value: ${pct(p.rcLevel)}`));
-  return lines.join('\n') + '\n';
-}
+interface BuildSet { id: string; hashes: { fcScript: string; fcBundle: string; txYaml: string }; status: string; createdAt: string }
 
 function StepArtifacts() {
   const w = useWizard();
   const fc = useFc();
-  const { access } = useStore();
   const txFw = useAsync(() => api<{ firmware: Firmware[] }>(`/firmware?kind=transmitter&target=${encodeURIComponent(w.tx.code)}`), [w.tx.code]);
-  const fcFw = useAsync(() => (w.snapshot ? api<{ firmware: Firmware[] }>(`/firmware?kind=fc&target=${encodeURIComponent(w.snapshot.target)}`) : Promise.resolve({ firmware: [] })), [w.snapshot?.target]);
+  const fcFw = useAsync(() => (w.fcTarget ? api<{ firmware: Firmware[] }>(`/firmware?kind=fc&target=${encodeURIComponent(w.fcTarget)}`) : Promise.resolve({ firmware: [] })), [w.fcTarget]);
+  const bs = useAsync<{ buildSet: BuildSet | null }>(() => (w.buildSetId ? api<{ buildSet: BuildSet }>(`/build-sets/${w.buildSetId}`) : Promise.resolve({ buildSet: null })), [w.buildSetId]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
   const pairs = w.vtx?.pairs ?? [];
-  const target = w.snapshot?.target ?? fc.info?.target ?? 'FC';
-  const uid8 = (w.uid ?? '').slice(0, 8);
+  const target = w.fcTarget ?? w.snapshot?.target ?? fc.info?.target ?? 'FC';
   const chosenFc = fcFw.data?.firmware.find((f) => f.id === w.firmwareId) ?? null;
   const txBin = txFw.data?.firmware[0] ?? null;
-
-  const fcScript = [
-    `# VTX Services — ${target} UID ${w.uid ?? ''} — ${new Date().toISOString()}`,
-    w.snapshot ? `# snapshot ${w.snapshot.id} (${w.snapshot.takenAt}), trust: ${w.snapshot.trust}` : '# без снимка',
-    '# 1) пользовательский diff', ...w.userDiff.split(/\r?\n/).filter((l) => l.trim() && !/^(save|exit|defaults)\b/i.test(l.trim())),
-    ...(w.diagBuild ? ['# 2) диагностическое логирование', ...w.diagBuild.cliScript.split('\n').filter((l) => l && !/^(save|#)/.test(l))] : []),
-    '# 3) карта VTX пишется по MSP2 0x2F11 (не CLI): band/ch/МГц/RC/мкс', ...pairs.map((p) => `#   ${String.fromCharCode(64 + p.band)}${p.channel} ${p.freqMhz} ch${p.rcChannel} ${p.rcLevel}`),
-    'save'
-  ].join('\n') + '\n';
-  const fcBundle = JSON.stringify({ target, uid: w.uid, snapshotId: w.snapshot?.id ?? null, trust: w.trust, firmware: chosenFc ? { id: chosenFc.id, fileName: chosenFc.fileName, sha256: chosenFc.sha256, verification: chosenFc.verification } : null, userDiff: w.userDiff, userDiffApplied: w.userDiffApplied, diagnosticBuild: w.diagBuild ? { id: w.diagBuild.id, logPath: w.diagBuild.logPath, applied: w.diagApplied } : null, vtx: w.vtx, transmitter: w.tx }, null, 2);
   const txName = `${w.tx.code.toUpperCase()}_VtxAuto_v3.1`;
+  const saved = bs.data?.buildSet ?? null;
+
+  async function save() {
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = await api<{ buildSet: BuildSet }>('/build-sets', {
+        method: 'POST',
+        json: {
+          uid: w.uid,
+          fcTarget: target,
+          fcVersion: w.fcVersion ?? w.snapshot?.version ?? '',
+          snapshotId: w.snapshot?.id ?? null,
+          fcFirmwareId: w.firmwareId,
+          txFirmwareId: txBin?.id ?? null,
+          diagnosticBuildId: w.diagBuild?.id ?? null,
+          vtxProfileId: w.tx.profileId,
+          vtxModelId: w.vtx?.modelId ?? null,
+          vtxModelName: w.vtx?.modelName ?? null,
+          freqSource: w.vtx?.freqSource ?? 'manual',
+          txModelCode: w.tx.code,
+          userDiff: w.userDiff,
+          pairs,
+          fcApplied: w.userDiffApplied,
+          vtxMapWritten: w.vtx?.writtenToFc ?? false
+        }
+      });
+      w.patch({ buildSetId: r.buildSet.id });
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const dl = (kind: 'fc_cli' | 'fc_bundle' | 'tx_yaml', name: string) => () => {
+    if (!w.buildSetId) return;
+    apiDownload(`/build-sets/${w.buildSetId}/artifact/${kind}`, name).catch((e: Error) => setErr(e.message));
+  };
 
   return (
     <>
       <Card title="7. Два артефакта">
-        <Tip>Ничего не «сгенерировано из воздуха»: FC-артефакт — это ваш diff + скрипт логирования + карта VTX, реально применённые/применяемые к борту; артефакт пульта — YAML-фрагмент модели EdgeTX с теми же парами для прошивки VtxAuto v3.1 и сама прошивка пульта, если она опубликована.</Tip>
+        <Tip>Артефакты формирует сервер из сохранённых данных (снимок, diff, скрипт логирования, карта VTX, пары пульта) и хранит вместе с sha256 — то, что вы скачаете, можно потом сопоставить с крэш-отчётом. FC-артефакт: diff + логирование + карта VTX; артефакт пульта: YAML-фрагмент модели EdgeTX для VtxAuto v3.1 и сама прошивка пульта, если она опубликована.</Tip>
+        <div className="row" style={{ marginBottom: 8 }}>
+          <button disabled={busy || !pairs.length || !w.uid} onClick={() => void save()}>{saved ? 'Пересобрать комплект' : 'Сохранить комплект на сервере'}</button>
+          {saved && <span className="badge ok">комплект {saved.id.slice(0, 8)} · {new Date(saved.createdAt).toLocaleString('ru')}</span>}
+          {!pairs.length && <span className="warn">Сначала задайте пары VTX (шаг 5).</span>}
+        </div>
+        {err && <p className="warn">{err}</p>}
         <div className="grid">
           <div>
             <h4>Борт {target}</h4>
             <ul>
-              <li>Прошивка: {chosenFc ? <>{chosenFc.fileName} <span className={`badge ${chosenFc.verification === 'flight_tested' ? 'ok' : 'warn'}`}>{chosenFc.verification}</span>{access?.type !== 'none' && <> · <a href={apiUrl(`/firmware/${chosenFc.id}/download`)}>скачать</a></>}</> : <span className="muted">не выбрана — остаётся текущая прошивка борта</span>}</li>
+              <li>Прошивка: {chosenFc ? <>{chosenFc.fileName} <span className={`badge ${chosenFc.verification === 'flight_tested' ? 'ok' : 'warn'}`}>{chosenFc.verification}</span> · <FirmwareDownload fw={chosenFc} /></> : <span className="muted">не выбрана — остаётся текущая прошивка борта</span>}</li>
               <li>Diff: {w.userDiff.trim() ? `${w.userDiff.trim().split('\n').length} строк, ${w.userDiffApplied ? 'применён' : 'не применён'}` : 'нет'}</li>
               <li>Логирование: {w.diagBuild ? `${w.diagBuild.logPath}, ${w.diagApplied ? 'включено' : 'скрипт не применён'}` : 'нет'}</li>
               <li>Карта VTX: {pairs.length ? `${pairs.length} пар, ${w.vtx?.writtenToFc ? 'записана в FC' : 'НЕ записана'}` : 'нет'}</li>
             </ul>
             <div className="row">
-              <button className="secondary" onClick={() => download(`fc-${target}-${uid8}.cli.txt`, fcScript)}>CLI-скрипт</button>
-              <button className="secondary" onClick={() => download(`fc-${target}-${uid8}.json`, fcBundle, 'application/json')}>Бандл JSON</button>
+              <button className="secondary" disabled={!saved} onClick={dl('fc_cli', `fc-${target}.cli.txt`)}>CLI-скрипт</button>
+              <button className="secondary" disabled={!saved} onClick={dl('fc_bundle', `fc-${target}.json`)}>Бандл JSON</button>
             </div>
+            {saved && <p className="muted" style={{ fontSize: 12 }}>sha256 CLI {saved.hashes.fcScript.slice(0, 16)}… · JSON {saved.hashes.fcBundle.slice(0, 16)}…</p>}
           </div>
           <div>
             <h4>Пульт {w.tx.name}</h4>
             <ul>
-              <li>Прошивка: {txBin ? <>{txBin.fileName} <span className={`badge ${txBin.verification === 'flight_tested' ? 'ok' : 'warn'}`}>{txBin.verification}</span>{access?.type !== 'none' && <> · <a href={apiUrl(`/firmware/${txBin.id}/download`)}>скачать</a></>}</> : <span className="warn">{txName}.bin ещё не опубликована для этой модели</span>}</li>
+              <li>Прошивка: {txBin ? <>{txBin.fileName} <span className={`badge ${txBin.verification === 'flight_tested' ? 'ok' : 'warn'}`}>{txBin.verification}</span> · <FirmwareDownload fw={txBin} /></> : <span className="warn">{txName}.bin ещё не опубликована для этой модели</span>}</li>
               <li>Конфигурация: {pairs.length} пар, RC-канал {pairs[0]?.rcChannel ?? '—'}</li>
               <li>Профиль в кабинете: {w.tx.profileId ? 'сохранён' : 'не сохранён'}</li>
             </ul>
             <div className="row">
-              <button className="secondary" disabled={!pairs.length} onClick={() => download(`${txName}_${uid8}.yml`, txYaml(pairs, w.vtx?.modelName ?? 'VTX'), 'text/yaml')}>YAML модели EdgeTX</button>
+              <button className="secondary" disabled={!saved} onClick={dl('tx_yaml', `${txName}.yml`)}>YAML модели EdgeTX</button>
             </div>
+            {saved && <p className="muted" style={{ fontSize: 12 }}>sha256 YAML {saved.hashes.txYaml.slice(0, 16)}…</p>}
             <p className="muted" style={{ fontSize: 13 }}>Фрагмент вставляется в MODELS/modelNN.yml на SD пульта (или вводится в меню VTX AUTO). Значения переведены в проценты хода канала, как их хранит прошивка.</p>
           </div>
         </div>

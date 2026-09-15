@@ -77,7 +77,24 @@ export async function apiUpload<T = Record<string, unknown>>(path: string, form:
   return data as T;
 }
 
-/** Absolute URL for binary API resources (images, firmware) rendered via <img>/<a>. */
+/** Authenticated download (Bearer token cannot travel in a plain <a href>); saves the response as a file. */
+export async function apiDownload(path: string, fallbackName: string): Promise<void> {
+  const headers = new Headers();
+  headers.set('X-Session-Id', sessionId());
+  headers.set('X-Fingerprint', await fingerprint());
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  const res = await fetch(`${API_BASE}/api${path}`, { headers, credentials: 'include' });
+  if (!res.ok) throw new ApiError(res.status, (await res.json().catch(() => ({}))) as Record<string, unknown>);
+  const name = /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') ?? '')?.[1] ?? fallbackName;
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** Absolute URL for public binary API resources (images) rendered via <img>. */
 export function apiUrl(path: string): string {
   return `${API_BASE}/api${path}`;
 }

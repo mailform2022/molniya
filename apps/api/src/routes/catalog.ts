@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { mkdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { buildAccessResponse } from '../lib/access.js';
+import { classifyTrust } from '../lib/diagnostics.js';
 import { env } from '../lib/env.js';
 import { parseFrequencyFile } from '../lib/freqfile.js';
 import { z } from 'zod';
@@ -43,12 +45,37 @@ export const catalogRoutes: FastifyPluginAsyncZod = async (app) => {
     return { success: true, firmware: list };
   });
 
-  app.get('/firmware/:id/download', { preHandler: app.authenticate, schema: { params: z.object({ id: z.string().uuid() }) } }, async (req, reply) => {
+  /**
+   * Download gate: published only; FC builds are refused for banned targets and, for non-verified targets,
+   * require a stored snapshot of the exact board (uid); transmitter builds need an active subscription
+   * (VTX AUTO is a paid feature) and a registered transmitter when uid is given.
+   */
+  app.get('/firmware/:id/download', { preHandler: app.authenticate, schema: { params: z.object({ id: z.string().uuid() }), querystring: z.object({ uid: z.string().regex(/^[0-9a-fA-F]{8,64}$/).optional(), fcVersion: z.string().max(32).optional() }) } }, async (req, reply) => {
     const [fw] = await app.db.select().from(schema.firmwareVersions).where(and(eq(schema.firmwareVersions.id, req.params.id), eq(schema.firmwareVersions.isPublished, true)));
     if (!fw) return reply.code(404).send({ success: false, error: 'not_found' });
+    const uid = req.query.uid?.toLowerCase();
+    if (fw.kind === 'fc') {
+      const rows = await app.db.select().from(schema.verifiedTargets);
+      const trust = classifyTrust(fw.target, req.query.fcVersion ?? fw.version, rows);
+      if (trust === 'banned') return reply.code(403).send({ success: false, error: 'target_banned' });
+      if (trust !== 'verified') {
+        if (!uid) return reply.code(409).send({ success: false, error: 'uid_required', hint: 'Для непроверенного target укажите UID борта: прошивка выдаётся только после снимка этого борта.' });
+        const [snap] = await app.db.select({ id: schema.boardSnapshots.id }).from(schema.boardSnapshots).where(and(eq(schema.boardSnapshots.uid, uid), eq(schema.boardSnapshots.userId, req.user.sub))).limit(1);
+        if (!snap) return reply.code(409).send({ success: false, error: 'snapshot_required', hint: 'Сначала снимите исходный снимок этого борта в мастере.' });
+      }
+    }
+    if (fw.kind === 'transmitter') {
+      const access = await buildAccessResponse(req.user.sub);
+      if (access.access.type === 'none') return reply.code(402).send({ ...access, success: false, error: 'subscription_required' });
+      if (uid) {
+        const [d] = await app.db.select({ id: schema.devices.id }).from(schema.devices).where(and(eq(schema.devices.uid, uid), eq(schema.devices.userId, req.user.sub), eq(schema.devices.kind, 'transmitter')));
+        if (!d) return reply.code(409).send({ success: false, error: 'transmitter_not_registered', hint: 'Зарегистрируйте пульт в кабинете (лимит по тарифу).' });
+      }
+    }
     const st = await stat(fw.filePath).catch(() => null);
     if (!st) return reply.code(410).send({ success: false, error: 'file_missing' });
-    await app.usage(req.user.sub, 'firmware.download', { id: fw.id, target: fw.target, version: fw.version });
+    await app.usage(req.user.sub, 'firmware.download', { id: fw.id, kind: fw.kind, target: fw.target, version: fw.version, uid: uid ?? null });
+    await app.audit(req, 'firmware.download', fw.id, { uid: uid ?? null });
     return reply
       .header('Content-Type', 'application/octet-stream')
       .header('Content-Disposition', `attachment; filename="${fw.fileName}"`)

@@ -34,6 +34,8 @@ interface WizardState {
   step: number;
   /** UID the wizard state belongs to; a different board resets the flow. */
   uid: string | null;
+  fcTarget: string | null;
+  fcVersion: string | null;
   trust: Trust | null;
   snapshot: SavedSnapshot | null;
   /** Edited CLI lines the user wants applied on top of the current config. */
@@ -44,8 +46,10 @@ interface WizardState {
   firmwareId: string | null;
   vtx: VtxResult | null;
   tx: TxChoice;
+  /** Server build set (POST /build-sets) — the saved, hashed artifacts for this board. */
+  buildSetId: string | null;
   setStep(n: number): void;
-  startFor(uid: string, trust: Trust): void;
+  startFor(info: { uid: string; target: string; version: string }, trust: Trust): void;
   patch(p: Partial<Omit<WizardState, 'setStep' | 'startFor' | 'patch' | 'reset'>>): void;
   reset(): void;
 }
@@ -53,6 +57,8 @@ interface WizardState {
 const initial = {
   step: 0,
   uid: null,
+  fcTarget: null,
+  fcVersion: null,
   trust: null,
   snapshot: null,
   userDiff: '',
@@ -61,7 +67,8 @@ const initial = {
   diagApplied: false,
   firmwareId: null,
   vtx: null,
-  tx: { code: 'tx12mk2', name: 'RadioMaster TX12 MK2', profileId: null, rcChannel: 9 }
+  tx: { code: 'tx12mk2', name: 'RadioMaster TX12 MK2', profileId: null, rcChannel: 9 },
+  buildSetId: null
 };
 
 export const useWizard = create<WizardState>()(
@@ -69,14 +76,14 @@ export const useWizard = create<WizardState>()(
     (set, get) => ({
       ...initial,
       setStep: (step) => set({ step }),
-      startFor: (uid, trust) => {
-        if (get().uid !== uid) set({ ...initial, uid, trust, step: 1 });
-        else set({ trust, step: Math.max(1, get().step) });
+      startFor: ({ uid, target, version }, trust) => {
+        if (get().uid !== uid) set({ ...initial, uid, fcTarget: target, fcVersion: version, trust, step: 1 });
+        else set({ trust, fcTarget: target, fcVersion: version, step: Math.max(1, get().step) });
       },
       patch: (p) => set(p),
       reset: () => set({ ...initial })
     }),
-    { name: 'vtx.wizard', version: 1 }
+    { name: 'vtx.wizard', version: 2 }
   )
 );
 

@@ -313,6 +313,76 @@ export const crashReports = pgTable(
   (t) => [index('crash_user_idx').on(t.userId), index('crash_status_idx').on(t.status)]
 );
 
+export type VtxPair = { band: number; channel: number; freqMhz: number; rcChannel: number; rcLevel: number };
+
+/**
+ * Result of one wizard pass for one board: the two artifacts (FC CLI script + JSON bundle, transmitter
+ * EdgeTX YAML) generated server-side from stored inputs, with provenance (snapshot, firmware, VTX source).
+ * Lets the user re-download / re-flash later and lets admins see what actually went onto boards.
+ */
+export const buildSets = pgTable(
+  'build_sets',
+  {
+    id: id(),
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    uid: varchar('uid', { length: 64 }).notNull(),
+    fcTarget: varchar('fc_target', { length: 64 }).notNull(),
+    trust: varchar('trust', { length: 16 }).notNull(), // verified | experimental | unverified
+    snapshotId: uuid('snapshot_id').references(() => boardSnapshots.id, { onDelete: 'set null' }),
+    fcFirmwareId: uuid('fc_firmware_id').references(() => firmwareVersions.id),
+    txFirmwareId: uuid('tx_firmware_id').references(() => firmwareVersions.id),
+    diagnosticBuildId: uuid('diagnostic_build_id').references(() => diagnosticBuilds.id, { onDelete: 'set null' }),
+    vtxProfileId: uuid('vtx_profile_id').references(() => vtxProfiles.id, { onDelete: 'set null' }),
+    vtxModelId: uuid('vtx_model_id').references(() => vtxModels.id),
+    vtxModelName: varchar('vtx_model_name', { length: 128 }),
+    /** catalog | vtx_info | manual | file */
+    freqSource: varchar('freq_source', { length: 16 }).notNull().default('manual'),
+    txModelCode: varchar('tx_model_code', { length: 64 }).notNull(),
+    userDiff: text('user_diff').notNull().default(''),
+    pairs: jsonb('pairs').$type<VtxPair[]>().notNull().default([]),
+    /** generated artifacts (text) + their hashes; regenerated only when inputs change */
+    fcScript: text('fc_script').notNull(),
+    fcBundle: text('fc_bundle').notNull(),
+    txYaml: text('tx_yaml').notNull(),
+    hashes: jsonb('hashes').$type<{ fcScript: string; fcBundle: string; txYaml: string }>().notNull(),
+    /** what has actually been done with the artifacts */
+    fcApplied: boolean('fc_applied').notNull().default(false),
+    vtxMapWritten: boolean('vtx_map_written').notNull().default(false),
+    txApplied: boolean('tx_applied').notNull().default(false),
+    /** draft | ready | flown_ok | crashed */
+    status: varchar('status', { length: 16 }).notNull().default('ready'),
+    crashReportId: uuid('crash_report_id').references(() => crashReports.id, { onDelete: 'set null' }),
+    name: varchar('name', { length: 128 }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt()
+  },
+  (t) => [index('build_sets_user_idx').on(t.userId), index('build_sets_uid_idx').on(t.uid)]
+);
+
+/**
+ * Flight feedback for a published/experimental firmware build from a real user on a real board.
+ * Positive reports are the only evidence that moves a build towards `flight_tested`; a crash report
+ * attached here links the iteration chain.
+ */
+export const firmwareFeedback = pgTable(
+  'firmware_feedback',
+  {
+    id: id(),
+    firmwareId: uuid('firmware_id').notNull().references(() => firmwareVersions.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    uid: varchar('uid', { length: 64 }).notNull().default(''),
+    buildSetId: uuid('build_set_id').references(() => buildSets.id, { onDelete: 'set null' }),
+    crashReportId: uuid('crash_report_id').references(() => crashReports.id, { onDelete: 'set null' }),
+    /** flew_ok | issue | crashed */
+    outcome: varchar('outcome', { length: 16 }).notNull(),
+    flights: integer('flights').notNull().default(1),
+    comment: text('comment'),
+    adminNote: text('admin_note'),
+    createdAt: createdAt()
+  },
+  (t) => [index('fw_feedback_fw_idx').on(t.firmwareId), uniqueIndex('fw_feedback_uq').on(t.firmwareId, t.userId, t.uid)]
+);
+
 export const boardPinLayouts = pgTable('board_pin_layouts', {
   id: id(),
   boardModelId: uuid('board_model_id').references(() => boardModels.id, { onDelete: 'cascade' }),
