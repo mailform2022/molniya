@@ -4,3 +4,5 @@ export * from './transport.js';
 export * from './client.js';
 export * from './emulator.js';
 export * from './vtxinfo.js';
+export * from './snapshot.js';
+export * from './blackbox.js';

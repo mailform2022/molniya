@@ -1,8 +1,11 @@
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
+import { fileURLToPath } from 'node:url';
 
 export default defineConfig({
+  // web bundles the MSP package from source (API consumes the compiled dist)
+  resolve: { alias: { '@vtx/msp': fileURLToPath(new URL('../../packages/msp/src/index.ts', import.meta.url)) } },
   plugins: [
     react(),
     VitePWA({

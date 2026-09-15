@@ -53,7 +53,7 @@ export const plans = pgTable('plans', {
   code: varchar('code', { length: 32 }).notNull().unique(), // BASE
   name: varchar('name', { length: 64 }).notNull(),
   durationDays: integer('duration_days').notNull().default(30),
-  deviceLimit: integer('device_limit').notNull().default(3),
+  deviceLimit: integer('device_limit').notNull().default(1),
   priceRub: integer('price_rub').notNull().default(0),
   features: jsonb('features').$type<Record<string, boolean | number | string>>().notNull().default({}),
   isActive: boolean('is_active').notNull().default(true),
@@ -81,7 +81,7 @@ export const subscriptions = pgTable(
     source: varchar('source', { length: 16 }).notNull(), // code | payment | manual | trial
     startsAt: timestamp('starts_at', { withTimezone: true }).notNull().defaultNow(),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-    deviceLimit: integer('device_limit').notNull().default(3),
+    deviceLimit: integer('device_limit').notNull().default(1),
     createdAt: createdAt()
   },
   (t) => [index('subs_user_idx').on(t.userId)]
@@ -196,11 +196,191 @@ export const firmwareVersions = pgTable(
     sizeBytes: integer('size_bytes').notNull(),
     changelog: text('changelog'),
     isPublished: boolean('is_published').notNull().default(false),
+    /**
+     * How far this build has been validated. Publication (isPublished) is only allowed from `flight_tested`.
+     * experimental → diagnostic → flight_tested → withdrawn
+     */
+    verification: varchar('verification', { length: 16 }).notNull().default('experimental'),
+    /** Catalog section shown to users, e.g. «Молния», «Утка». */
+    section: varchar('section', { length: 64 }),
+    /** Crash report whose analysis this build fixes (iteration chain). */
+    fixesCrashReportId: uuid('fixes_crash_report_id'),
+    withdrawnReason: text('withdrawn_reason'),
     modelIds: jsonb('model_ids').$type<string[]>().default([]),
     createdBy: uuid('created_by').references(() => users.id),
     createdAt: createdAt()
   },
   (t) => [index('fw_target_idx').on(t.kind, t.target)]
+);
+
+/** FC targets + INAV version that are known to fly with our firmware. Anything else is «unverified». */
+export const verifiedTargets = pgTable(
+  'verified_targets',
+  {
+    id: id(),
+    fcTarget: varchar('fc_target', { length: 64 }).notNull(),
+    /** exact version or prefix like `7.1` */
+    inavVersion: varchar('inav_version', { length: 32 }).notNull(),
+    boardModelId: uuid('board_model_id').references(() => boardModels.id),
+    /** verified: flown OK; experimental: flown, problems (e.g. «Утка»); banned: do not flash */
+    status: varchar('status', { length: 16 }).notNull().default('verified'),
+    evidence: text('evidence'),
+    createdBy: uuid('created_by').references(() => users.id),
+    createdAt: createdAt()
+  },
+  (t) => [uniqueIndex('verified_targets_uq').on(t.fcTarget, t.inavVersion)]
+);
+
+/**
+ * Immutable pre-change snapshot of a connected FC: identity, `diff all`, storage capability,
+ * optional firmware image. Taken before any write; referenced by diagnostic builds and crash reports.
+ */
+export const boardSnapshots = pgTable(
+  'board_snapshots',
+  {
+    id: id(),
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    deviceId: uuid('device_id').references(() => devices.id, { onDelete: 'set null' }),
+    uid: varchar('uid', { length: 64 }).notNull(),
+    fcVariant: varchar('fc_variant', { length: 8 }).notNull(),
+    fcVersion: varchar('fc_version', { length: 32 }).notNull(),
+    fcTarget: varchar('fc_target', { length: 64 }).notNull(),
+    boardId: varchar('board_id', { length: 8 }),
+    /** verified | experimental | unverified | banned — computed at snapshot time from verified_targets */
+    trust: varchar('trust', { length: 16 }).notNull(),
+    transport: jsonb('transport').$type<{ vid?: number; pid?: number; label: string }>(),
+    diffAll: text('diff_all'),
+    diffSha256: varchar('diff_sha256', { length: 64 }),
+    statusText: text('status_text'),
+    vtxConfig: jsonb('vtx_config').$type<Record<string, number>>(),
+    vtxMap: jsonb('vtx_map').$type<Array<Record<string, number>>>(),
+    capability: jsonb('capability').$type<Record<string, unknown>>(),
+    /** firmware image dumped externally (DFU/ST-Link) and uploaded; null when not taken */
+    imagePath: text('image_path'),
+    imageSha256: varchar('image_sha256', { length: 64 }),
+    imageSizeBytes: integer('image_size_bytes'),
+    imageSource: varchar('image_source', { length: 32 }), // dfu-util | stm32cubeprog | st-link | other
+    note: text('note'),
+    createdAt: createdAt()
+  },
+  (t) => [index('snapshots_user_idx').on(t.userId), index('snapshots_uid_idx').on(t.uid)]
+);
+
+/**
+ * Diagnostic build request for an unverified board: base firmware + `diff` that enables logging.
+ * Output is a CLI script (deterministic from inputs) + a link to the firmware file to flash.
+ */
+export const diagnosticBuilds = pgTable('diagnostic_builds', {
+  id: id(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  snapshotId: uuid('snapshot_id').notNull().references(() => boardSnapshots.id, { onDelete: 'cascade' }),
+  baseFirmwareId: uuid('base_firmware_id').references(() => firmwareVersions.id),
+  logPath: varchar('log_path', { length: 16 }).notNull(), // flash | sdcard | serial_host
+  options: jsonb('options').$type<Record<string, unknown>>().notNull(),
+  /** CLI lines to apply after flashing the base firmware (user diff + logging + debug) */
+  cliScript: text('cli_script').notNull(),
+  status: varchar('status', { length: 16 }).notNull().default('ready'), // ready | applied | flown | crashed
+  createdAt: createdAt(),
+  updatedAt: updatedAt()
+});
+
+/** Post-crash upload + analysis, compared against the pre-change snapshot. */
+export const crashReports = pgTable(
+  'crash_reports',
+  {
+    id: id(),
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    snapshotId: uuid('snapshot_id').references(() => boardSnapshots.id, { onDelete: 'set null' }),
+    diagnosticBuildId: uuid('diagnostic_build_id').references(() => diagnosticBuilds.id, { onDelete: 'set null' }),
+    uid: varchar('uid', { length: 64 }),
+    fcTarget: varchar('fc_target', { length: 64 }),
+    description: text('description'),
+    /** `diff all` read from the board after the crash */
+    diffAfter: text('diff_after'),
+    /** uploaded files: blackbox logs, MSP host logs, photos */
+    files: jsonb('files').$type<Array<{ kind: string; name: string; path: string; sha256: string; sizeBytes: number }>>().notNull().default([]),
+    /** machine analysis: diff comparison, blackbox summary, findings */
+    analysis: jsonb('analysis').$type<Record<string, unknown>>(),
+    status: varchar('status', { length: 16 }).notNull().default('new'), // new | analyzed | fix_proposed | fixed | closed
+    adminNote: text('admin_note'),
+    fixFirmwareId: uuid('fix_firmware_id').references(() => firmwareVersions.id),
+    fixDiffContent: text('fix_diff_content'),
+    /** user feedback after flying the fix */
+    userVerdict: varchar('user_verdict', { length: 16 }), // ok | still_crashes | not_flown
+    createdAt: createdAt(),
+    updatedAt: updatedAt()
+  },
+  (t) => [index('crash_user_idx').on(t.userId), index('crash_status_idx').on(t.status)]
+);
+
+export type VtxPair = { band: number; channel: number; freqMhz: number; rcChannel: number; rcLevel: number };
+
+/**
+ * Result of one wizard pass for one board: the two artifacts (FC CLI script + JSON bundle, transmitter
+ * EdgeTX YAML) generated server-side from stored inputs, with provenance (snapshot, firmware, VTX source).
+ * Lets the user re-download / re-flash later and lets admins see what actually went onto boards.
+ */
+export const buildSets = pgTable(
+  'build_sets',
+  {
+    id: id(),
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    uid: varchar('uid', { length: 64 }).notNull(),
+    fcTarget: varchar('fc_target', { length: 64 }).notNull(),
+    trust: varchar('trust', { length: 16 }).notNull(), // verified | experimental | unverified
+    snapshotId: uuid('snapshot_id').references(() => boardSnapshots.id, { onDelete: 'set null' }),
+    fcFirmwareId: uuid('fc_firmware_id').references(() => firmwareVersions.id),
+    txFirmwareId: uuid('tx_firmware_id').references(() => firmwareVersions.id),
+    diagnosticBuildId: uuid('diagnostic_build_id').references(() => diagnosticBuilds.id, { onDelete: 'set null' }),
+    vtxProfileId: uuid('vtx_profile_id').references(() => vtxProfiles.id, { onDelete: 'set null' }),
+    vtxModelId: uuid('vtx_model_id').references(() => vtxModels.id),
+    vtxModelName: varchar('vtx_model_name', { length: 128 }),
+    /** catalog | vtx_info | manual | file */
+    freqSource: varchar('freq_source', { length: 16 }).notNull().default('manual'),
+    txModelCode: varchar('tx_model_code', { length: 64 }).notNull(),
+    userDiff: text('user_diff').notNull().default(''),
+    pairs: jsonb('pairs').$type<VtxPair[]>().notNull().default([]),
+    /** generated artifacts (text) + their hashes; regenerated only when inputs change */
+    fcScript: text('fc_script').notNull(),
+    fcBundle: text('fc_bundle').notNull(),
+    txYaml: text('tx_yaml').notNull(),
+    hashes: jsonb('hashes').$type<{ fcScript: string; fcBundle: string; txYaml: string }>().notNull(),
+    /** what has actually been done with the artifacts */
+    fcApplied: boolean('fc_applied').notNull().default(false),
+    vtxMapWritten: boolean('vtx_map_written').notNull().default(false),
+    txApplied: boolean('tx_applied').notNull().default(false),
+    /** draft | ready | flown_ok | crashed */
+    status: varchar('status', { length: 16 }).notNull().default('ready'),
+    crashReportId: uuid('crash_report_id').references(() => crashReports.id, { onDelete: 'set null' }),
+    name: varchar('name', { length: 128 }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt()
+  },
+  (t) => [index('build_sets_user_idx').on(t.userId), index('build_sets_uid_idx').on(t.uid)]
+);
+
+/**
+ * Flight feedback for a published/experimental firmware build from a real user on a real board.
+ * Positive reports are the only evidence that moves a build towards `flight_tested`; a crash report
+ * attached here links the iteration chain.
+ */
+export const firmwareFeedback = pgTable(
+  'firmware_feedback',
+  {
+    id: id(),
+    firmwareId: uuid('firmware_id').notNull().references(() => firmwareVersions.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    uid: varchar('uid', { length: 64 }).notNull().default(''),
+    buildSetId: uuid('build_set_id').references(() => buildSets.id, { onDelete: 'set null' }),
+    crashReportId: uuid('crash_report_id').references(() => crashReports.id, { onDelete: 'set null' }),
+    /** flew_ok | issue | crashed */
+    outcome: varchar('outcome', { length: 16 }).notNull(),
+    flights: integer('flights').notNull().default(1),
+    comment: text('comment'),
+    adminNote: text('admin_note'),
+    createdAt: createdAt()
+  },
+  (t) => [index('fw_feedback_fw_idx').on(t.firmwareId), uniqueIndex('fw_feedback_uq').on(t.firmwareId, t.userId, t.uid)]
 );
 
 export const boardPinLayouts = pgTable('board_pin_layouts', {
@@ -283,12 +463,38 @@ export const vtxSubmissions = pgTable('vtx_submissions', {
   cliStatusHex: text('cli_status_hex'),
   parsedStatus: jsonb('parsed_status').$type<Record<string, unknown>>(),
   autoDetection: jsonb('auto_detection').$type<Record<string, unknown>>(),
+  /** Raw request/response exchange with the VTX captured during the wizard (hex, direction, note). */
+  rawLog: jsonb('raw_log').$type<Array<{ t: number; dir: 'tx' | 'rx' | 'info'; hex?: string; text: string }>>().notNull().default([]),
+  /** Where the frequency grid came from: catalog | vtx_info | manual | file */
+  freqSource: varchar('freq_source', { length: 16 }).notNull().default('manual'),
+  freqFile: jsonb('freq_file').$type<{ name: string; path: string; sha256: string }>(),
+  fcTarget: varchar('fc_target', { length: 64 }),
+  fcVersion: varchar('fc_version', { length: 32 }),
   status: varchar('status', { length: 24 }).notNull().default('pending_review'), // pending_review | approved | rejected | info_requested | merged
   moderatorNote: text('moderator_note'),
   resultVtxModelId: uuid('result_vtx_model_id'),
   createdAt: createdAt(),
   updatedAt: updatedAt()
 });
+
+/** Photos of a VTX uploaded by contributors (identification); admins edit captions/annotations and hide. */
+export const vtxPhotos = pgTable(
+  'vtx_photos',
+  {
+    id: id(),
+    submissionId: uuid('submission_id').references(() => vtxSubmissions.id, { onDelete: 'cascade' }),
+    vtxModelId: uuid('vtx_model_id').references(() => vtxModels.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id').notNull().references(() => users.id),
+    imagePath: text('image_path').notNull(),
+    sha256: varchar('sha256', { length: 64 }).notNull(),
+    caption: varchar('caption', { length: 255 }),
+    annotations: jsonb('annotations').$type<Array<{ x: number; y: number; label: string }>>().notNull().default([]),
+    isHidden: boolean('is_hidden').notNull().default(false),
+    sortOrder: integer('sort_order').notNull().default(0),
+    createdAt: createdAt()
+  },
+  (t) => [index('vtx_photos_model_idx').on(t.vtxModelId), index('vtx_photos_sub_idx').on(t.submissionId)]
+);
 
 export const vtxAutoDetections = pgTable('vtx_auto_detections', {
   id: id(),

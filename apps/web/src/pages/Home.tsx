@@ -19,8 +19,9 @@ export function HomePage() {
         {!webSerialSupported && <p className="warn" style={{ marginTop: 14 }}>{help ?? 'Ваш браузер не поддерживает Web Serial.'}</p>}
       </div>
       <div className="grid">
-        <Card title="AutoDetect VTX">Подключите борт — определим VTX по MSP/CLI, подберём сетку частот и сгенерируем diff. <Link to="/vtx">Открыть →</Link></Card>
-        <Card title="AutoFlash">Пресеты прошивки INAV 7 + diff + OSD + VTX. Конвейерный режим для партий бортов. <Link to="/autoflash">Открыть →</Link></Card>
+        <Card title="Мастер: борт не переключает каналы">Один путь: определяем FC → снимок до изменений → diff с подсказками → прошивка или диагностическое логирование → VTX и сетка → пульт TX12 MK2 → два артефакта → отчёт после полёта. <Link to="/wizard">Начать →</Link></Card>
+        <Card title="AutoDetect VTX">Только определить VTX по MSP/CLI, подобрать сетку и записать карту. <Link to="/vtx">Открыть →</Link></Card>
+        <Card title="AutoFlash">Пресеты diff + OSD + VTX для проверенных бортов; для непроверенных требует снимка из мастера. <Link to="/autoflash">Открыть →</Link></Card>
         <Card title="Diff-система">Эталонные diff, версии, откат, шаринг по ссылке, проверка конфликтов. <Link to="/diff">Открыть →</Link></Card>
         <Card title="Пульты">Прошивки VtxAuto v3.1 для RadioMaster TX16S / TX15 / TX12 / Pocket / Boxer. <Link to="/account/devices">Мои устройства →</Link></Card>
         <Card title="Эмуляторы">Виртуальный пульт и борт для обучения без железа. <Link to="/emulators">Открыть →</Link></Card>

@@ -9,13 +9,13 @@ import { analyzeDiff } from '../lib/diff.js';
 export async function seed(db: Db): Promise<void> {
   await db
     .insert(schema.plans)
-    .values({ code: 'BASE', name: 'Base', durationDays: 30, deviceLimit: 3, priceRub: 0, features: { boards_unlimited: true, configurator: true, autoflash: true, diff: true, emulators: true } })
-    .onConflictDoNothing();
+    .values({ code: 'BASE', name: 'Base', durationDays: 30, deviceLimit: 1, priceRub: 0, features: { boards_unlimited: true, configurator: true, autoflash: true, diff: true, emulators: true } })
+    .onConflictDoUpdate({ target: schema.plans.code, set: { durationDays: 30, deviceLimit: 1 } });
 
   await db
     .insert(schema.planAddons)
     .values([
-      { code: 'extra_device', name: '+1 пульт', kind: 'extra_device', amount: 1, priceRub: 0 },
+      { code: 'extra_device', name: '+1 пульт (докупается отдельно)', kind: 'extra_device', amount: 1, priceRub: 0 },
       { code: 'extra_time', name: '+30 дней', kind: 'extra_time', amount: 30, priceRub: 0 }
     ])
     .onConflictDoNothing();
@@ -103,6 +103,15 @@ export async function seed(db: Db): Promise<void> {
     ['feature.pwa_install_prompt', true, 'Кнопка «Установить приложение»']
   ];
   for (const [key, value, description] of flags) await db.insert(schema.featureFlags).values({ key, value, description }).onConflictDoNothing();
+
+  // Flight-verification status per FC target: Molniya boards flown on 7.1.x; «Утка» crashed → experimental until fixed.
+  await db
+    .insert(schema.verifiedTargets)
+    .values([
+      { fcTarget: 'CADDXF405_WING', inavVersion: '7.1', status: 'verified', evidence: 'Молния 2 / M13: рабочие борта на INAV 7.1.x (inav PR #2)' },
+      { fcTarget: 'SPEEDYBEEF405WING', inavVersion: '7.1', status: 'experimental', evidence: '«Утка»: падение в полёте, blackbox не работал, dataflash отсутствует — требуется диагностическая итерация' }
+    ])
+    .onConflictDoNothing();
 
   const cms: Array<[string, unknown]> = [
     ['home.hero', { title: 'VTX Services', subtitle: 'Прошивка и настройка полётных контроллеров и пультов: VTX AUTO, diff, автопрошивка', cta: 'Подключить борт' }],

@@ -66,7 +66,7 @@ function Subscription() {
         )}
       </Card>
       <Card title="Активировать код">
-        <Tip>Формат: <span className="kbd">MLN-ACT-BASE-30D-3XABCD-XXXXXX</span>. Код продления (EXT) добавляет дни к текущей подписке.</Tip>
+        <Tip>Формат: <span className="kbd">MLN-ACT-BASE-30D-1XABCD-XXXXXX</span>. Код продления (EXT) добавляет дни к текущей подписке.</Tip>
         <div className="row" style={{ marginTop: 10 }}>
           <input placeholder="MLN-…" value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} style={{ flex: 1 }} />
           <button onClick={() => void redeem()} disabled={code.length < 20}>Активировать</button>
@@ -77,7 +77,7 @@ function Subscription() {
         {plans.data?.plans.map((p) => (
           <div key={p.code} className="row" style={{ justifyContent: 'space-between', padding: '6px 0' }}>
             <b>{p.name}</b>
-            <span className="muted">{p.durationDays} дн. · {p.deviceLimit} пульта · безлимит бортов и конфигуратора</span>
+            <span className="muted">{p.durationDays} дн. · VTX AUTO на {p.deviceLimit} {p.deviceLimit === 1 ? 'пульте' : 'пультах'} · безлимит бортов и конфигуратора · доп. пульты докупаются отдельно</span>
             <span>{p.priceRub ? `${p.priceRub} ₽` : 'по коду'}</span>
           </div>
         ))}

@@ -16,6 +16,8 @@ import { catalogRoutes } from './routes/catalog.js';
 import { contentRoutes } from './routes/content.js';
 import { deviceRoutes } from './routes/devices.js';
 import { diffRoutes } from './routes/diff.js';
+import { buildSetRoutes } from './routes/buildsets.js';
+import { diagnosticsRoutes } from './routes/diagnostics.js';
 import { realtimeRoutes } from './routes/realtime.js';
 import { subscriptionRoutes } from './routes/subscription.js';
 
@@ -43,7 +45,7 @@ export async function buildApp() {
   });
   await app.register(rateLimit, { global: true, max: 300, timeWindow: '1 minute' });
   await app.register(sensible);
-  await app.register(multipart, { limits: { fileSize: 8 * 1024 * 1024, files: 1 } });
+  await app.register(multipart, { limits: { fileSize: 64 * 1024 * 1024, files: 12 } });
   await app.register(websocket);
   await app.register(infraPlugin);
   await app.register(authPlugin);
@@ -80,6 +82,8 @@ export async function buildApp() {
       await api.register(deviceRoutes);
       await api.register(catalogRoutes);
       await api.register(diffRoutes);
+      await api.register(diagnosticsRoutes);
+      await api.register(buildSetRoutes);
       await api.register(contentRoutes);
       await api.register(realtimeRoutes);
       await api.register(adminAuthRoutes);

@@ -53,3 +53,53 @@ test('vtx_info parser + validation', () => {
   assert.equal(errs.length, 1);
   assert.match(errs[0]!, /дубликат/);
 });
+
+test('snapshot: CLI session, diff all, blackbox capability on emulated boards', async () => {
+  const { takeFcSnapshot, parseDiff, compareDiff } = await import('./snapshot.js');
+  const { defaultEmulatedFc } = await import('./emulator.js');
+
+  const molniya = new EmulatedFc(defaultEmulatedFc('molniya'));
+  const c1 = new MspClient(molniya.transport, { timeoutMs: 200, retries: 1 });
+  await c1.open();
+  const s1 = await takeFcSnapshot(c1);
+  assert.equal(s1.target, 'CADDXF405_WING');
+  assert.equal(s1.capability.recommended, 'flash');
+  assert.ok(s1.diffAll && /set max_throttle = 1850/.test(s1.diffAll));
+  assert.ok(s1.statusText && /Dataflash/.test(s1.statusText));
+
+  const utka = new EmulatedFc(defaultEmulatedFc('utka'));
+  const c2 = new MspClient(utka.transport, { timeoutMs: 200, retries: 1 });
+  await c2.open();
+  const s2 = await takeFcSnapshot(c2);
+  assert.equal(s2.target, 'SPEEDYBEEF405WING');
+  assert.equal(s2.capability.recommended, 'serial_host');
+  assert.equal(s2.vtxMap, null); // stock INAV: 0x2F10 rejected
+
+  // change a critical setting and compare
+  const sess = await c2.cliSession();
+  await sess.run('set nav_fw_launch_thr = 1900');
+  const after = await sess.run('diff all', 3000);
+  await sess.end('exit');
+  const cmp = compareDiff(parseDiff(s2.diffAll!), parseDiff(after));
+  assert.equal(cmp.settings.length, 1);
+  assert.equal(cmp.settings[0]!.key, 'nav_fw_launch_thr');
+  assert.ok(cmp.settings[0]!.critical);
+  assert.equal(cmp.criticalCount, 1);
+});
+
+test('blackbox container parser: headers, multiple logs, clean end detection', async () => {
+  const { parseBlackboxFile } = await import('./blackbox.js');
+  const hdr = (fw: string) =>
+    `H Product:Blackbox flight data recorder by Nicholas Sherlock\nH Data version:2\nH Firmware revision:${fw}\nH Board information:SBF4 SPEEDYBEEF405WING\nH Craft name:Utka\nH looptime:1000\nH P interval:1/2\n`;
+  const body = new Uint8Array(5000).fill(0x50);
+  const enc = new TextEncoder();
+  const log1 = [...enc.encode(hdr('INAV 7.1.2 (abc) SPEEDYBEEF405WING')), ...body, ...enc.encode('E\xffEnd of log\0')];
+  const log2 = [...enc.encode(hdr('INAV 7.1.2 (abc) SPEEDYBEEF405WING')), ...body];
+  const res = parseBlackboxFile(new Uint8Array([...log1, ...log2]));
+  assert.equal(res.logs.length, 2);
+  assert.equal(res.logs[0]!.cleanEnd, true);
+  assert.equal(res.logs[1]!.cleanEnd, false);
+  assert.equal(res.logs[0]!.logRateHz, 500);
+  assert.equal(res.logs[0]!.board, 'SBF4 SPEEDYBEEF405WING');
+  assert.ok(res.warnings.some((w) => /#2/.test(w)));
+});

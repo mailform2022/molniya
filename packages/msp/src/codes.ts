@@ -11,7 +11,11 @@ export const MSP = {
   SET_CLI: 0xf3, // not in upstream INAV; kept as an alias for CLI entry via serial '#'
   CLI_EXIT: 0xf4,
   UID: 160,
-  RC: 105
+  RC: 105,
+  DATAFLASH_SUMMARY: 70,
+  DATAFLASH_READ: 71,
+  DATAFLASH_ERASE: 72,
+  SDCARD_SUMMARY: 79
 } as const;
 
 /** MSP v2 INAV commands (0x2000+). */
@@ -24,6 +28,8 @@ export const MSP2 = {
   INAV_MIXER: 0x2010,
   INAV_SET_MIXER: 0x2011,
   INAV_OUTPUT_MAPPING_EXT: 0x201d,
+  BLACKBOX_CONFIG: 0x201a,
+  SET_BLACKBOX_CONFIG: 0x201b,
   /** Custom 3.3 GHz grid table (already in mailform2022/inav). */
   INAV_VTX_TABLE_CUSTOM: 0x2f00,
   INAV_SET_VTX_TABLE_CUSTOM: 0x2f01

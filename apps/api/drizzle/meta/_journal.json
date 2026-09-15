@@ -8,6 +8,27 @@
       "when": 1789373804601,
       "tag": "0000_watery_elektra",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1789466678169,
+      "tag": "0001_snapshots_diagnostics",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789468820936,
+      "tag": "0002_base_plan_one_transmitter",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1789472943463,
+      "tag": "0003_build_sets_feedback",
+      "breakpoints": true
     }
   ]
 }

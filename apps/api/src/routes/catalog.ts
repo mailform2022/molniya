@@ -1,7 +1,13 @@
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import { and, desc, eq, gte, sql } from 'drizzle-orm';
+import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { mkdir, stat, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { buildAccessResponse } from '../lib/access.js';
+import { classifyTrust } from '../lib/diagnostics.js';
+import { env } from '../lib/env.js';
+import { parseFrequencyFile } from '../lib/freqfile.js';
 import { z } from 'zod';
 import { schema } from '../db/index.js';
 
@@ -29,6 +35,8 @@ export const catalogRoutes: FastifyPluginAsyncZod = async (app) => {
         sizeBytes: schema.firmwareVersions.sizeBytes,
         changelog: schema.firmwareVersions.changelog,
         modelIds: schema.firmwareVersions.modelIds,
+        verification: schema.firmwareVersions.verification,
+        section: schema.firmwareVersions.section,
         createdAt: schema.firmwareVersions.createdAt
       })
       .from(schema.firmwareVersions)
@@ -37,12 +45,37 @@ export const catalogRoutes: FastifyPluginAsyncZod = async (app) => {
     return { success: true, firmware: list };
   });
 
-  app.get('/firmware/:id/download', { preHandler: app.authenticate, schema: { params: z.object({ id: z.string().uuid() }) } }, async (req, reply) => {
+  /**
+   * Download gate: published only; FC builds are refused for banned targets and, for non-verified targets,
+   * require a stored snapshot of the exact board (uid); transmitter builds need an active subscription
+   * (VTX AUTO is a paid feature) and a registered transmitter when uid is given.
+   */
+  app.get('/firmware/:id/download', { preHandler: app.authenticate, schema: { params: z.object({ id: z.string().uuid() }), querystring: z.object({ uid: z.string().regex(/^[0-9a-fA-F]{8,64}$/).optional(), fcVersion: z.string().max(32).optional() }) } }, async (req, reply) => {
     const [fw] = await app.db.select().from(schema.firmwareVersions).where(and(eq(schema.firmwareVersions.id, req.params.id), eq(schema.firmwareVersions.isPublished, true)));
     if (!fw) return reply.code(404).send({ success: false, error: 'not_found' });
+    const uid = req.query.uid?.toLowerCase();
+    if (fw.kind === 'fc') {
+      const rows = await app.db.select().from(schema.verifiedTargets);
+      const trust = classifyTrust(fw.target, req.query.fcVersion ?? fw.version, rows);
+      if (trust === 'banned') return reply.code(403).send({ success: false, error: 'target_banned' });
+      if (trust !== 'verified') {
+        if (!uid) return reply.code(409).send({ success: false, error: 'uid_required', hint: 'Для непроверенного target укажите UID борта: прошивка выдаётся только после снимка этого борта.' });
+        const [snap] = await app.db.select({ id: schema.boardSnapshots.id }).from(schema.boardSnapshots).where(and(eq(schema.boardSnapshots.uid, uid), eq(schema.boardSnapshots.userId, req.user.sub))).limit(1);
+        if (!snap) return reply.code(409).send({ success: false, error: 'snapshot_required', hint: 'Сначала снимите исходный снимок этого борта в мастере.' });
+      }
+    }
+    if (fw.kind === 'transmitter') {
+      const access = await buildAccessResponse(req.user.sub);
+      if (access.access.type === 'none') return reply.code(402).send({ ...access, success: false, error: 'subscription_required' });
+      if (uid) {
+        const [d] = await app.db.select({ id: schema.devices.id }).from(schema.devices).where(and(eq(schema.devices.uid, uid), eq(schema.devices.userId, req.user.sub), eq(schema.devices.kind, 'transmitter')));
+        if (!d) return reply.code(409).send({ success: false, error: 'transmitter_not_registered', hint: 'Зарегистрируйте пульт в кабинете (лимит по тарифу).' });
+      }
+    }
     const st = await stat(fw.filePath).catch(() => null);
     if (!st) return reply.code(410).send({ success: false, error: 'file_missing' });
-    await app.usage(req.user.sub, 'firmware.download', { id: fw.id, target: fw.target, version: fw.version });
+    await app.usage(req.user.sub, 'firmware.download', { id: fw.id, kind: fw.kind, target: fw.target, version: fw.version, uid: uid ?? null });
+    await app.audit(req, 'firmware.download', fw.id, { uid: uid ?? null });
     return reply
       .header('Content-Type', 'application/octet-stream')
       .header('Content-Disposition', `attachment; filename="${fw.fileName}"`)
@@ -76,18 +109,85 @@ export const catalogRoutes: FastifyPluginAsyncZod = async (app) => {
           freqTable: z.array(z.array(z.number().int().min(1000).max(8000)).min(1).max(16)).min(1).max(8),
           cliStatusHex: z.string().max(4096).optional(),
           parsedStatus: z.record(z.unknown()).optional(),
-          autoDetection: z.record(z.unknown()).optional()
+          autoDetection: z.record(z.unknown()).optional(),
+          rawLog: z.array(z.object({ t: z.number(), dir: z.enum(['tx', 'rx', 'info']), hex: z.string().regex(/^[0-9a-fA-F]*$/).max(1024).optional(), text: z.string().max(512) })).max(2000).default([]),
+          freqSource: z.enum(['catalog', 'vtx_info', 'manual', 'file']).default('manual'),
+          fcTarget: z.string().max(64).optional(),
+          fcVersion: z.string().max(32).optional()
         })
       }
     },
     async (req, reply) => {
       const flat = req.body.freqTable.flat();
       if (new Set(flat).size !== flat.length) return reply.code(400).send({ success: false, error: 'duplicate_frequencies' });
+      const rowLen = req.body.freqTable[0]!.length;
+      if (req.body.freqTable.some((r) => r.length !== rowLen)) return reply.code(400).send({ success: false, error: 'ragged_freq_table', hint: 'Во всех бэндах должно быть одинаковое число каналов.' });
+      if (req.body.rangeId) {
+        const [range] = await app.db.select().from(schema.frequencyRanges).where(eq(schema.frequencyRanges.id, req.body.rangeId));
+        if (!range) return reply.code(400).send({ success: false, error: 'range_not_found' });
+        const out = flat.filter((f) => f < range.minMhz || f > range.maxMhz);
+        if (out.length) return reply.code(400).send({ success: false, error: 'frequency_out_of_range', hint: `Вне диапазона ${range.minMhz}–${range.maxMhz} МГц: ${out.slice(0, 8).join(', ')}` });
+      }
       const [s] = await app.db.insert(schema.vtxSubmissions).values({ userId: req.user.sub, ...req.body }).returning();
       await app.audit(req, 'vtx.submit', s!.id);
       return reply.code(201).send({ success: true, submission: s });
     }
   );
+
+  /**
+   * Photos of the VTX for visual identification. Attached to a pending submission (submissionId) or to an
+   * approved model (vtxModelId). Multiple users may upload different photos of the same device.
+   */
+  app.post('/vtx-photos', { preHandler: app.requireRole(['operator', 'technician']), config: { rateLimit: { max: 30, timeWindow: '1 hour' } } }, async (req, reply) => {
+    const fields: Record<string, string> = {};
+    const files: Array<{ name: string; buf: Buffer; mime: string }> = [];
+    for await (const part of req.parts()) {
+      if (part.type === 'file') files.push({ name: part.filename, buf: await part.toBuffer(), mime: part.mimetype });
+      else fields[part.fieldname] = String(part.value);
+    }
+    const meta = z.object({ submissionId: z.string().uuid().optional(), vtxModelId: z.string().uuid().optional(), caption: z.string().max(255).optional() }).safeParse(fields);
+    if (!meta.success || (!meta.data.submissionId && !meta.data.vtxModelId)) return reply.code(400).send({ success: false, error: 'bad_request', hint: 'submissionId или vtxModelId обязателен' });
+    if (files.length === 0) return reply.code(400).send({ success: false, error: 'photo_required' });
+    if (meta.data.submissionId) {
+      const [s] = await app.db.select({ userId: schema.vtxSubmissions.userId }).from(schema.vtxSubmissions).where(eq(schema.vtxSubmissions.id, meta.data.submissionId));
+      if (!s || s.userId !== req.user.sub) return reply.code(404).send({ success: false, error: 'submission_not_found' });
+    }
+    const dir = path.join(env.UPLOAD_DIR, 'vtx-photos', meta.data.vtxModelId ?? meta.data.submissionId!);
+    await mkdir(dir, { recursive: true });
+    const saved = [];
+    for (const f of files) {
+      if (!/^image\/(jpeg|png|webp)$/.test(f.mime)) return reply.code(400).send({ success: false, error: 'unsupported_image_type', hint: f.mime });
+      const sha256 = createHash('sha256').update(f.buf).digest('hex');
+      const imagePath = path.join(dir, `${sha256.slice(0, 16)}${path.extname(f.name).toLowerCase() || '.jpg'}`);
+      await writeFile(imagePath, f.buf);
+      const [p] = await app.db.insert(schema.vtxPhotos).values({ submissionId: meta.data.submissionId ?? null, vtxModelId: meta.data.vtxModelId ?? null, userId: req.user.sub, imagePath, sha256, caption: meta.data.caption ?? null }).returning();
+      saved.push(p!);
+    }
+    return reply.code(201).send({ success: true, photos: saved });
+  });
+  app.get('/vtx-photos', { schema: { querystring: z.object({ vtxModelId: z.string().uuid() }) } }, async (req) => ({
+    success: true,
+    photos: await app.db.select({ id: schema.vtxPhotos.id, caption: schema.vtxPhotos.caption, annotations: schema.vtxPhotos.annotations, sortOrder: schema.vtxPhotos.sortOrder, createdAt: schema.vtxPhotos.createdAt }).from(schema.vtxPhotos).where(and(eq(schema.vtxPhotos.vtxModelId, req.query.vtxModelId), eq(schema.vtxPhotos.isHidden, false))).orderBy(schema.vtxPhotos.sortOrder)
+  }));
+  app.get('/vtx-photos/:id/image', { schema: { params: z.object({ id: z.string().uuid() }) } }, async (req, reply) => {
+    const [p] = await app.db.select().from(schema.vtxPhotos).where(eq(schema.vtxPhotos.id, req.params.id));
+    if (!p || p.isHidden) return reply.code(404).send({ success: false, error: 'not_found' });
+    const st = await stat(p.imagePath).catch(() => null);
+    if (!st) return reply.code(410).send({ success: false, error: 'file_missing' });
+    const ext = path.extname(p.imagePath).slice(1);
+    return reply.header('Content-Type', `image/${ext === 'jpg' ? 'jpeg' : ext}`).header('Cache-Control', 'public, max-age=86400').send(createReadStream(p.imagePath));
+  });
+
+  /** Parse an uploaded frequency-grid file (CSV / TXT / JSON / INAV `vtxtable` dump) into a band×channel table. Nothing is stored. */
+  app.post('/vtx-frequency-file', { preHandler: app.authenticate }, async (req, reply) => {
+    const file = await req.file();
+    if (!file) return reply.code(400).send({ success: false, error: 'file_required' });
+    const buf = await file.toBuffer();
+    if (buf.length > 256 * 1024) return reply.code(413).send({ success: false, error: 'file_too_large' });
+    const parsed = parseFrequencyFile(buf.toString('utf8'), file.filename);
+    if (!parsed.ok) return reply.code(400).send({ success: false, error: 'unparsable_frequency_file', hint: parsed.error });
+    return { success: true, ...parsed, sha256: createHash('sha256').update(buf).digest('hex') };
+  });
 
   app.get('/vtx-submissions/mine', { preHandler: app.authenticate }, async (req) => ({
     success: true,
