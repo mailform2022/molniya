@@ -206,6 +206,10 @@ export const firmwareVersions = pgTable(
     /** Crash report whose analysis this build fixes (iteration chain). */
     fixesCrashReportId: uuid('fixes_crash_report_id'),
     withdrawnReason: text('withdrawn_reason'),
+    /** Where the binary came from: source repo/branch/commit, patch sha256, toolchain, build flags. */
+    provenance: jsonb('provenance').$type<Record<string, string>>(),
+    /** Admin-attested evidence used for flight_tested when no in-system feedback exists (e.g. flights before the platform). */
+    flightEvidenceNote: text('flight_evidence_note'),
     modelIds: jsonb('model_ids').$type<string[]>().default([]),
     createdBy: uuid('created_by').references(() => users.id),
     createdAt: createdAt()

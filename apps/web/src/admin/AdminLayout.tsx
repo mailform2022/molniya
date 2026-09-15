@@ -184,38 +184,82 @@ function Codes() {
   );
 }
 
+type FwRow = { id: string; kind: string; target: string; version: string; fileName: string; sha256: string; sizeBytes: number; isPublished: boolean; changelog: string | null; verification: string; section: string | null; flightEvidenceNote: string | null; provenance: Record<string, string> | null };
+
 function Firmware() {
-  const list = useAsync(() => api<{ firmware: Array<{ id: string; kind: string; target: string; version: string; fileName: string; sha256: string; sizeBytes: number; isPublished: boolean; changelog: string | null }> }>('/admin/firmware'));
+  const list = useAsync(() => api<{ firmware: FwRow[] }>('/admin/firmware'));
   const { notify } = useStore();
-  const [meta, setMeta] = useState({ kind: 'transmitter', target: 'tx16s', version: '3.1.0', changelog: '', isPublished: false });
+  const [meta, setMeta] = useState({ kind: 'transmitter', target: 'TX12MK2', version: '3.1.0', section: '', changelog: '', verification: 'experimental', provenance: '' });
   const [file, setFile] = useState<File | null>(null);
+  const [busy, setBusy] = useState(false);
+  function fail(e: unknown) { notify(e instanceof ApiError ? e.message : String(e)); }
   async function upload() {
     if (!file) return;
-    const fd = new FormData();
-    Object.entries(meta).forEach(([k, v]) => fd.append(k, String(v)));
-    fd.append('file', file);
-    const res = await fetch(`${import.meta.env.VITE_API_URL ?? ''}/api/admin/firmware`, { method: 'POST', body: fd, headers: { Authorization: `Bearer ${localStorage.getItem('vtx.token')}` } });
-    if (!res.ok) return notify('Ошибка загрузки');
-    notify('Загружено');
-    list.reload();
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      Object.entries(meta).forEach(([k, v]) => { if (v !== '') fd.append(k, String(v)); });
+      fd.append('file', file);
+      const res = await fetch(`${import.meta.env.VITE_API_URL ?? ''}/api/admin/firmware`, { method: 'POST', body: fd, headers: { Authorization: `Bearer ${localStorage.getItem('vtx.token')}` } });
+      const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!res.ok) throw new ApiError(res.status, body);
+      notify(`Загружено, sha256 ${String((body.firmware as FwRow).sha256).slice(0, 12)}…`);
+      list.reload();
+    } catch (e) { fail(e); } finally { setBusy(false); }
+  }
+  async function patch(id: string, json: Record<string, unknown>) {
+    try { await api(`/admin/firmware/${id}`, { method: 'PATCH', json }); list.reload(); } catch (e) { fail(e); }
+  }
+  function setVerification(f: FwRow, verification: string) {
+    if (verification === 'withdrawn') {
+      const withdrawnReason = window.prompt('Причина отзыва прошивки (увидят пользователи):') ?? '';
+      if (!withdrawnReason) return;
+      return void patch(f.id, { verification, withdrawnReason });
+    }
+    if (verification === 'flight_tested') {
+      const flightEvidenceNote = window.prompt('Доказательство полёта, если отзывов «отлетал нормально» в сервисе нет: кто, на каком борте/пульте, когда, сколько полётов (минимум 20 символов). Оставьте пустым, чтобы опереться только на отзывы в сервисе.') ?? '';
+      return void patch(f.id, flightEvidenceNote ? { verification, flightEvidenceNote } : { verification });
+    }
+    void patch(f.id, { verification });
   }
   return (
     <>
       <Card title="Загрузить прошивку">
-        <Tip>Имена пультов: <span className="kbd">TX16S_VtxAuto_v3.1.bin</span>. FC: <span className="kbd">inav_7.1.2_CADDXF405_WING.hex</span>. Публикация создаёт событие для клиентов.</Tip>
+        <Tip>
+          Имена пультов: <span className="kbd">TX12MK2_VtxAuto_v3.1.bin</span>, FC: <span className="kbd">inav_7.1.2_CADDXF405_WING.hex</span>. Загрузка всегда создаёт <b>неопубликованную</b> запись
+          (experimental/diagnostic). Опубликовать можно только <b>flight_tested</b>: отзыв «отлетал нормально», подтверждённое исправление крэша или явная запись о полётах. Provenance — JSON вида{' '}
+          <span className="kbd">{'{"repo":"…","commit":"…","toolchain":"…"}'}</span>: откуда собран бинарник.
+        </Tip>
         <div className="row" style={{ marginTop: 10 }}>
           <select style={{ width: 'auto' }} value={meta.kind} onChange={(e) => setMeta({ ...meta, kind: e.target.value })}><option value="transmitter">Пульт</option><option value="fc">FC</option><option value="configurator">Конфигуратор</option></select>
           <input style={{ width: 160 }} placeholder="target" value={meta.target} onChange={(e) => setMeta({ ...meta, target: e.target.value })} />
           <input style={{ width: 100 }} placeholder="версия" value={meta.version} onChange={(e) => setMeta({ ...meta, version: e.target.value })} />
-          <input style={{ flex: 1 }} placeholder="changelog" value={meta.changelog} onChange={(e) => setMeta({ ...meta, changelog: e.target.value })} />
+          <input style={{ width: 120 }} placeholder="раздел" value={meta.section} onChange={(e) => setMeta({ ...meta, section: e.target.value })} />
+          <select style={{ width: 'auto' }} value={meta.verification} onChange={(e) => setMeta({ ...meta, verification: e.target.value })}><option value="experimental">experimental</option><option value="diagnostic">diagnostic</option></select>
           <input type="file" style={{ width: 'auto' }} onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
-          <label className="row" style={{ margin: 0 }}><input type="checkbox" style={{ width: 'auto' }} checked={meta.isPublished} onChange={(e) => setMeta({ ...meta, isPublished: e.target.checked })} /> опубликовать</label>
-          <button disabled={!file} onClick={() => void upload()}>Загрузить</button>
+        </div>
+        <div className="row" style={{ marginTop: 8 }}>
+          <input style={{ flex: 1 }} placeholder="changelog" value={meta.changelog} onChange={(e) => setMeta({ ...meta, changelog: e.target.value })} />
+          <input style={{ flex: 1 }} placeholder='provenance JSON {"repo":"…","commit":"…"}' value={meta.provenance} onChange={(e) => setMeta({ ...meta, provenance: e.target.value })} />
+          <button disabled={!file || busy} onClick={() => void upload()}>Загрузить</button>
         </div>
       </Card>
       <Card title="Прошивки">
-        <table><thead><tr><th>Тип</th><th>Target</th><th>Версия</th><th>Файл</th><th>SHA-256</th><th>Публ.</th></tr></thead>
-          <tbody>{list.data?.firmware.map((f) => <tr key={f.id}><td>{f.kind}</td><td>{f.target}</td><td>{f.version}</td><td>{f.fileName} <span className="muted">{(f.sizeBytes / 1024).toFixed(0)} КБ</span></td><td className="kbd">{f.sha256.slice(0, 12)}…</td><td><input type="checkbox" style={{ width: 'auto' }} checked={f.isPublished} onChange={(e) => void api(`/admin/firmware/${f.id}`, { method: 'PATCH', json: { isPublished: e.target.checked } }).then(list.reload)} /></td></tr>)}</tbody></table>
+        <table><thead><tr><th>Тип</th><th>Target</th><th>Версия</th><th>Раздел</th><th>Файл</th><th>SHA-256</th><th>Проверка</th><th>Публ.</th></tr></thead>
+          <tbody>{list.data?.firmware.map((f) => (
+            <tr key={f.id} style={{ opacity: f.verification === 'withdrawn' ? 0.5 : 1 }}>
+              <td>{f.kind}</td><td>{f.target}</td><td>{f.version}</td>
+              <td><input style={{ width: 90 }} defaultValue={f.section ?? ''} onBlur={(e) => { if (e.target.value !== (f.section ?? '')) void patch(f.id, { section: e.target.value || null }); }} /></td>
+              <td title={f.provenance ? JSON.stringify(f.provenance, null, 1) : 'provenance не указан'}>{f.fileName} <span className="muted">{(f.sizeBytes / 1024).toFixed(0)} КБ{f.provenance ? '' : ' · без provenance'}</span></td>
+              <td className="kbd" title={f.sha256}>{f.sha256.slice(0, 12)}…</td>
+              <td title={f.flightEvidenceNote ?? ''}>
+                <select style={{ width: 'auto' }} value={f.verification} onChange={(e) => setVerification(f, e.target.value)}>
+                  {['experimental', 'diagnostic', 'flight_tested', 'withdrawn'].map((v) => <option key={v} value={v}>{v}</option>)}
+                </select>
+              </td>
+              <td><input type="checkbox" style={{ width: 'auto' }} checked={f.isPublished} disabled={!f.isPublished && f.verification !== 'flight_tested'} onChange={(e) => void patch(f.id, { isPublished: e.target.checked })} /></td>
+            </tr>
+          ))}</tbody></table>
       </Card>
     </>
   );
