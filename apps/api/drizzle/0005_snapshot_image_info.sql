@@ -1,0 +1,1 @@
+ALTER TABLE "board_snapshots" ADD COLUMN "image_info" jsonb;

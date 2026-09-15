@@ -2,6 +2,7 @@ import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { buildApp } from './app.js';
 import { db } from './db/index.js';
 import { seed } from './db/seed.js';
+import { seedBundledFirmware } from './db/bundled_firmware.js';
 import { env } from './lib/env.js';
 
 const app = await buildApp();
@@ -10,6 +11,7 @@ if (process.env.SKIP_MIGRATIONS !== '1') {
   try {
     await migrate(db, { migrationsFolder: new URL('../drizzle', import.meta.url).pathname });
     await seed(db);
+    await seedBundledFirmware(db, (m) => app.log.info(m));
     app.log.info('migrations applied');
   } catch (e) {
     app.log.error({ err: e }, 'migration failed');

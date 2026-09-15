@@ -1,18 +1,18 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { parseDiff, takeFcSnapshot, type FcSnapshot, type VtxPair } from '@vtx/msp';
+import { parseDiff, takeFcSnapshot, type FcSnapshot } from '@vtx/msp';
 import { Card, Steps, Tip, useAsync } from '../components/ui';
+import { ArmRelayEditor, OsdZonesEditor } from '../components/DiffBuilders';
 import { api, apiDownload, apiUpload, ApiError } from '../lib/api';
-import { useFc, webSerialSupported } from '../lib/fc';
+import { connectivityHint, useFc, webSerialSupported } from '../lib/fc';
 import { useStore } from '../lib/store';
 import { TRUST_LABEL, canWrite, snapshotRequired, useWizard, type DiagBuild, type Trust } from '../lib/wizard';
 import { VtxFlow } from './VtxWizard';
+import { TransmitterPanel } from './Transmitter';
 
 const STEPS = ['Борт', 'Снимок', 'Diff и опции', 'Прошивка', 'VTX и сетка', 'Пульт', 'Артефакты', 'После полёта'];
 
 interface Firmware { id: string; kind: string; target: string; version: string; fileName: string; sha256: string; sizeBytes: number; changelog: string | null; verification: string; section: string | null }
-interface TxModel { id: string; code: string; name: string; platform: string; firmwareTarget: string | null; display: string | null }
-interface VtxProfile { id: string; name: string; pairs: VtxPair[]; vtxModelId: string | null }
 
 /**
  * One safe path for a board that is not switching channels yet:
@@ -45,7 +45,7 @@ export function WizardPage() {
       {w.step === 2 && <StepDiff gate={gate} />}
       {w.step === 3 && <StepFirmware gate={gate} />}
       {w.step === 4 && (fc.info ? <VtxFlow writeAllowed={gate} onDone={(vtx) => { w.patch({ vtx }); w.setStep(5); }} /> : <NeedBoard />)}
-      {w.step === 5 && <StepTransmitter />}
+      {w.step === 5 && <TransmitterPanel embedded onNext={() => w.setStep(6)} />}
       {w.step === 6 && <StepArtifacts />}
       {w.step === 7 && <StepCrash />}
     </>
@@ -58,7 +58,7 @@ function NeedBoard() {
 }
 
 // ---------------------------------------------------------------- 1. connect + identify + trust
-function StepConnect() {
+export function StepConnect() {
   const fc = useFc();
   const w = useWizard();
   const [busy, setBusy] = useState(false);
@@ -88,9 +88,13 @@ function StepConnect() {
       {fc.info ? (
         <p><span className="badge ok">{fc.info.variant} {fc.info.version}</span> {fc.info.target} · board {fc.info.boardId} · UID <span className="kbd">{fc.info.uid}</span></p>
       ) : (
-        <p className="muted">{webSerialSupported ? 'Нажмите «Подключить» и выберите COM-порт борта.' : 'Web Serial недоступен в этом браузере — используйте Chrome/Edge на ПК или Android (OTG).'}</p>
+        <p className="muted">{webSerialSupported ? 'Нажмите «Подключить» и выберите порт борта.' : connectivityHint()}</p>
+      )}
+      {fc.link === 'lost' && fc.info && (
+        <p className="err">Связь с бортом потеряна (порт закрыт). <button className="secondary" disabled={busy} onClick={() => { setBusy(true); fc.ensureLink().catch((e: Error) => setErr(e.message)).finally(() => setBusy(false)); }}>Переподключить</button></p>
       )}
       {(err ?? fc.error) && <p className="err">{err ?? fc.error}</p>}
+      <p className="muted" style={{ fontSize: 12 }}>{connectivityHint()}</p>
       <div className="row" style={{ marginTop: 10 }}>
         <button disabled={busy || !webSerialSupported} onClick={() => void go(fc.info && !fc.emulated ? undefined : {})}>{fc.info && !fc.emulated ? 'Определить доверие' : 'Подключить'}</button>
         <button className="secondary" disabled={busy} onClick={() => void go({ emulate: true, preset: 'molniya' })}>Эмулятор: Молния (проверенный)</button>
@@ -110,7 +114,7 @@ function StepConnect() {
 }
 
 // ---------------------------------------------------------------- 2. read-only snapshot → /snapshots
-function StepSnapshot() {
+export function StepSnapshot() {
   const fc = useFc();
   const w = useWizard();
   const { notify } = useStore();
@@ -124,11 +128,9 @@ function StepSnapshot() {
     setBusy(true);
     setProgress([]);
     try {
-      const snap = await takeFcSnapshot(fc.client, (t) => setProgress((p) => [...p, t]));
-      if (!fc.emulated) {
-        setProgress((p) => [...p, 'CLI exit → борт перезагружается, переподключение…']);
-        await fc.reconnectAfterReboot();
-      }
+      setProgress(['Проверка связи с бортом…']);
+      const client = await fc.ensureLink();
+      const snap = await takeFcSnapshot(client, (t) => setProgress((p) => [...p, t]));
       setLocal(snap);
       const r = await api<{ snapshot: { id: string; diffSha256: string | null }; trust: Trust }>('/snapshots', {
         method: 'POST',
@@ -141,6 +143,15 @@ function StepSnapshot() {
       w.patch({ trust: r.trust, snapshot: { id: r.snapshot.id, uid: snap.uid, target: snap.target, version: snap.version, trust: r.trust, takenAt: snap.takenAt, diffSha256: r.snapshot.diffSha256, local: snap } });
       setProgress((p) => [...p, `Сохранено на сервере: ${r.snapshot.id}`]);
       notify('Снимок борта сохранён');
+      if (!fc.emulated && snap.diffAll) {
+        setProgress((p) => [...p, 'Борт перезагружается после CLI, ждём USB…']);
+        try {
+          await fc.reconnectAfterReboot();
+          setProgress((p) => [...p, 'Связь с бортом восстановлена']);
+        } catch (e) {
+          setProgress((p) => [...p, `Снимок сохранён, но борт не вернулся на связь: ${(e as Error).message}`]);
+        }
+      }
     } catch (e) {
       setProgress((p) => [...p, `Ошибка: ${(e as Error).message}`]);
     } finally {
@@ -202,12 +213,10 @@ function StepSnapshot() {
 // ---------------------------------------------------------------- 3. user diff + options with hints
 const OPTION_HINTS: Array<{ title: string; hint: string; lines: string }> = [
   { title: 'Увеличенный газ в круизе', hint: 'nav_fw_cruise_thr — газ автопилота (1000–2000). Больше — быстрее, но растёт ток и падает время полёта.', lines: 'set nav_fw_cruise_thr = 1500\nset nav_fw_max_thr = 1900' },
-  { title: 'Серва на конкретном выходе', hint: 'smix назначает вход (например, RC-канал) на выход сервы: smix <№> <серво> <источник> <вес> <скорость>. Источники: 0 стабилизированный roll … 38+ RC-каналы.', lines: 'smix 4 5 38 100 0' },
-  { title: 'Шторка/окно OSD', hint: 'osd_layout <лэйаут> <элемент> <x> <y> <V|H> — координаты элемента. Углы окна задаются позициями элементов; при переносе на другой дисплей значения меняются.', lines: 'osd_layout 0 15 12 1 V' },
-  { title: 'Реле взвода на RC-канале', hint: 'aux <слот> <режим> <RC-канал-4> <от> <до>: режим по уровню канала. Для 1700–2100 мкс диапазон 1700 2100.', lines: 'aux 5 0 3 1700 2100' }
+  { title: 'Серва на RC-канале (например, сброс)', hint: 'smix <правило> <servo> <источник> <вес> <скорость> <условие>. Источники RC: CH5=8, CH6=9, CH7=10, CH8=11, CH9=15 … CH16=22. Пин выхода = моторы + порядковый номер servo среди используемых (на Молнии servo 5 → S7 от CH10).', lines: 'servo 5 1000 2000 1500 100\nsmix 4 5 16 100 0 -1' }
 ];
 
-function StepDiff({ gate }: { gate: { ok: boolean; why: string | null } }) {
+export function StepDiff({ gate }: { gate: { ok: boolean; why: string | null } }) {
   const fc = useFc();
   const w = useWizard();
   const { notify } = useStore();
@@ -260,6 +269,8 @@ function StepDiff({ gate }: { gate: { ok: boolean; why: string | null } }) {
           {applyLog.length > 0 && <div className="log" style={{ marginTop: 8 }}>{applyLog.join('\n')}</div>}
         </div>
         <div>
+          <OsdZonesEditor baseDiff={w.snapshot?.local.diffAll ?? undefined} onAdd={(lines) => w.patch({ userDiff: `${w.userDiff.trimEnd()}\n${lines}\n`.trimStart(), userDiffApplied: false })} />
+          <ArmRelayEditor baseDiff={w.snapshot?.local.diffAll ?? undefined} onAdd={(lines) => w.patch({ userDiff: `${w.userDiff.trimEnd()}\n${lines}\n`.trimStart(), userDiffApplied: false })} />
           {OPTION_HINTS.map((h) => (
             <details key={h.title} style={{ marginBottom: 6 }}>
               <summary>{h.title}</summary>
@@ -282,7 +293,7 @@ function StepDiff({ gate }: { gate: { ok: boolean; why: string | null } }) {
 }
 
 // ---------------------------------------------------------------- 4. firmware: verified build or diagnostic script
-function StepFirmware({ gate }: { gate: { ok: boolean; why: string | null } }) {
+export function StepFirmware({ gate }: { gate: { ok: boolean; why: string | null } }) {
   const fc = useFc();
   const w = useWizard();
   const { notify } = useStore();
@@ -380,85 +391,9 @@ function StepFirmware({ gate }: { gate: { ok: boolean; why: string | null } }) {
   );
 }
 
-// ---------------------------------------------------------------- 6. transmitter (TX12 MK2 default)
-function StepTransmitter() {
-  const w = useWizard();
-  const { notify, access } = useStore();
-  const models = useAsync(() => api<{ transmitters: TxModel[] }>('/models'));
-  const profiles = useAsync(() => api<{ profiles: VtxProfile[] }>('/vtx-profiles'));
-  const [txUid, setTxUid] = useState('');
-  const [busy, setBusy] = useState(false);
-  const pairs = w.vtx?.pairs ?? [];
-  const model = models.data?.transmitters.find((m) => m.code === w.tx.code);
-
-  async function saveProfile() {
-    setBusy(true);
-    try {
-      const r = await api<{ profile: VtxProfile }>('/vtx-profiles', { method: 'POST', json: { name: `${w.tx.name} · ${w.vtx?.modelName ?? 'VTX'} · ${new Date().toLocaleDateString()}`, vtxModelId: w.vtx?.modelId ?? undefined, pairs } });
-      w.patch({ tx: { ...w.tx, profileId: r.profile.id } });
-      notify('Профиль пульта сохранён');
-      profiles.reload();
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function registerTx() {
-    setBusy(true);
-    try {
-      await api('/devices', { method: 'POST', json: { kind: 'transmitter', uid: txUid.trim().toLowerCase(), name: w.tx.name, modelId: model?.id } });
-      notify('Пульт зарегистрирован — VTX AUTO активен на нём по тарифу');
-    } catch (e) {
-      notify(e instanceof ApiError && e.body.error === 'device_limit_reached' ? `Лимит пультов по тарифу (${access?.device_limit ?? 1}) исчерпан — докупите «+1 пульт» в кабинете` : (e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Card title="6. Пульт: те же пары band/канал">
-      <Tip>Пульт (EdgeTX + VTX AUTO v3.1) хранит в модели список пар «band/канал → уровень RC-канала». FC по своей карте ставит частоту на VTX по тому же уровню. Пары берутся из шага VTX — они обязаны совпадать, иначе пульт и борт «разъедутся». По умолчанию — TX12 MK2.</Tip>
-      {!w.vtx && <p className="err">Сначала пройдите шаг VTX: пар ещё нет.</p>}
-      <label>Модель пульта</label>
-      <select value={w.tx.code} onChange={(e) => { const m = models.data?.transmitters.find((x) => x.code === e.target.value); if (m) w.patch({ tx: { ...w.tx, code: m.code, name: m.name } }); }}>
-        {models.data?.transmitters.map((m) => <option key={m.code} value={m.code}>{m.name}{m.code === 'tx12mk2' ? ' (по умолчанию)' : ''}</option>)}
-      </select>
-      <label>Сохранённый профиль (вместо пар с текущего шага VTX)</label>
-      <select value={w.tx.profileId ?? ''} onChange={(e) => { const p = profiles.data?.profiles.find((x) => x.id === e.target.value); w.patch({ tx: { ...w.tx, profileId: p?.id ?? null }, vtx: p ? { modelId: p.vtxModelId, modelName: null, rangeId: null, freqSource: 'catalog', freqTable: [], pairs: p.pairs, writtenToFc: false } : w.vtx }); }}>
-        <option value="">— пары из шага VTX</option>
-        {profiles.data?.profiles.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.pairs.length} пар)</option>)}
-      </select>
-      <label>RC-канал VTX AUTO на пульте</label>
-      <input type="number" min={5} max={16} value={pairs[0]?.rcChannel ?? w.tx.rcChannel} readOnly />
-      <TxScreen model={w.tx.code} pairs={pairs} />
-      <div className="row" style={{ marginTop: 10 }}>
-        <button className="secondary" disabled={busy || !pairs.length} onClick={() => void saveProfile()}>Сохранить профиль</button>
-        <button disabled={!pairs.length} onClick={() => w.setStep(6)}>Далее: артефакты →</button>
-      </div>
-      <details style={{ marginTop: 12 }}>
-        <summary>Зарегистрировать этот пульт по UID (тариф: {access?.devices_used ?? 0}/{access?.device_limit ?? 1} пультов)</summary>
-        <p className="muted">UID показан на пульте: меню VTX AUTO → Info. Пульт вне тарифа VTX AUTO не активируется; дополнительные пульты докупаются отдельно.</p>
-        <input value={txUid} onChange={(e) => setTxUid(e.target.value)} placeholder="24 hex" />
-        <button disabled={busy || !/^[0-9a-fA-F]{8,64}$/.test(txUid.trim())} onClick={() => void registerTx()}>Зарегистрировать</button>
-      </details>
-    </Card>
-  );
-}
-
-/** What the VTX AUTO menu will show on the radio for the given pairs (128x64 mono for TX12/Pocket/Boxer). */
-function TxScreen({ model, pairs }: { model: string; pairs: VtxPair[] }) {
-  const mono = ['tx12', 'tx12mk2', 'pocket', 'boxer'].includes(model);
-  return (
-    <div className="log" style={{ marginTop: 10, maxWidth: mono ? 320 : 480, background: mono ? '#c7d6b0' : '#0b1020', color: mono ? '#101810' : '#e5e7eb' }}>
-      {`VTX AUTO  ${model.toUpperCase()}  ${pairs.length ? `1/${pairs.length}` : '-'}\n`}
-      {pairs.slice(0, 8).map((p, i) => `${i === 0 ? '>' : ' '}${String.fromCharCode(64 + p.band)}${p.channel}  ${p.freqMhz} MHz  CH${p.rcChannel} ${p.rcLevel}us`).join('\n') || 'нет пар'}
-      {pairs.length > 8 && `\n… ещё ${pairs.length - 8}`}
-    </div>
-  );
-}
-
 // ---------------------------------------------------------------- 7. artifacts (generated and stored server-side: POST /build-sets)
 /** Firmware file download goes through the API gate (trust/snapshot for FC, subscription for transmitter). */
-function FirmwareDownload({ fw }: { fw: Firmware }) {
+export function FirmwareDownload({ fw }: { fw: Firmware }) {
   const w = useWizard();
   const [err, setErr] = useState<string | null>(null);
   const q = fw.kind === 'fc' ? `?uid=${encodeURIComponent(w.uid ?? '')}&fcVersion=${encodeURIComponent(w.fcVersion ?? '')}` : '';
@@ -578,7 +513,7 @@ function StepArtifacts() {
 // ---------------------------------------------------------------- 8. post-flight: crash report
 interface CrashReport { id: string; status: string; analysis: { diffNote: string; logs: Array<{ name: string; kind: string; note: string }>; findings: Array<{ severity: string; text: string }> } | null; fixFirmwareId: string | null; fixDiffContent: string | null; userVerdict: string | null }
 
-function StepCrash() {
+export function StepCrash() {
   const w = useWizard();
   const fc = useFc();
   const { notify } = useStore();
@@ -593,7 +528,8 @@ function StepCrash() {
     if (!fc.client) return;
     setBusy(true);
     try {
-      const s = await fc.client.cliSession();
+      const client = await fc.ensureLink();
+      const s = await client.cliSession();
       try { setDiffAfter(await s.run('diff all', 8000)); } finally { await s.end('exit'); }
       if (!fc.emulated) await fc.reconnectAfterReboot();
     } catch (e) {

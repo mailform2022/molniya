@@ -2,25 +2,27 @@ import { useEffect } from 'react';
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { AccessBar, InstallPwaButton, Toast } from './components/ui';
 import { useStore } from './lib/store';
+import { useFc } from './lib/fc';
 import { AdminLayout } from './admin/AdminLayout';
 import { AccountPage } from './pages/Account';
 import { AuthPage } from './pages/Auth';
 import { AutoFlashPage } from './pages/AutoFlash';
+import { BoardPage } from './pages/Board';
 import { ConnectPage } from './pages/Connect';
 import { DiffPage } from './pages/Diff';
 import { EmulatorsPage } from './pages/Emulators';
 import { HomePage } from './pages/Home';
 import { NewsPage } from './pages/News';
 import { SubmitPage } from './pages/Submit';
+import { TransmitterPage } from './pages/Transmitter';
 import { VtxWizardPage } from './pages/VtxWizard';
 import { WizardPage } from './pages/Wizard';
 
 const NAV = [
   ['/wizard', 'Мастер'],
-  ['/connect', 'Борт'],
+  ['/board', 'Борт'],
   ['/vtx', 'VTX'],
-  ['/autoflash', 'Прошивка'],
-  ['/diff', 'Diff'],
+  ['/transmitter', 'Пульт'],
   ['/emulators', 'Эмуляторы'],
   ['/news', 'Новости'],
   ['/account', 'Кабинет']
@@ -31,6 +33,21 @@ function Protected({ children }: { children: JSX.Element }) {
   const loc = useLocation();
   if (loading) return <p className="muted">Загрузка…</p>;
   return user ? children : <Navigate to="/auth" state={{ from: loc.pathname }} replace />;
+}
+
+/** Board link status + a one-click release of the COM port so an external configurator can take it. */
+function FcBadge() {
+  const { client, info, emulated, link, disconnect } = useFc();
+  if (!client) return null;
+  const label = emulated ? 'эмулятор' : link === 'ready' ? 'на связи' : link === 'connecting' ? 'переподключение…' : 'порт закрыт';
+  return (
+    <span className={`badge ${link === 'ready' ? 'ok' : 'warn'}`} title={info ? `${info.target} ${info.version} · UID ${info.uid}` : ''}>
+      Борт {info?.target ?? ''} · {label}{' '}
+      <button className="secondary" style={{ padding: '0 6px', marginLeft: 4 }} onClick={() => void disconnect()} title="Освободить COM-порт (для INAV Configurator и т.п.)">
+        Отключить
+      </button>
+    </span>
+  );
 }
 
 export function App() {
@@ -61,6 +78,7 @@ export function App() {
           <img src="/favicon.svg" width={24} height={24} alt="" /> VTX Services
         </NavLink>
         {user && <AccessBar />}
+        {user && <FcBadge />}
         {user && presence.length > 1 && (
           <span className="badge" title={presence.map((p) => `${p.role} · ${p.device ?? ''}`).join('\n')}>
             {presence.length} сессии · вы {sessionRole}
@@ -81,8 +99,10 @@ export function App() {
           <Route path="/" element={<HomePage />} />
           <Route path="/auth" element={<AuthPage />} />
           <Route path="/connect" element={<ConnectPage />} />
+          <Route path="/board/*" element={<Protected><BoardPage /></Protected>} />
           <Route path="/wizard" element={<Protected><WizardPage /></Protected>} />
           <Route path="/vtx" element={<Protected><VtxWizardPage /></Protected>} />
+          <Route path="/transmitter" element={<Protected><TransmitterPage /></Protected>} />
           <Route path="/autoflash" element={<Protected><AutoFlashPage /></Protected>} />
           <Route path="/diff" element={<Protected><DiffPage /></Protected>} />
           <Route path="/diff/shared/:token" element={<DiffPage />} />

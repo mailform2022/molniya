@@ -12,6 +12,10 @@ interface VtxModel { id: string; name: string; manufacturer: string | null; rang
 type FreqSource = VtxResult['freqSource'];
 type RawLogEntry = { t: number; dir: 'tx' | 'rx' | 'info'; text: string };
 
+const VTX_DEV_NAME: Record<number, string> = { 0: 'нет', 1: 'RTC6705', 3: 'SmartAudio', 4: 'Tramp', 5: 'MSP VTX', 255: 'не определён' };
+const POWER_LABEL = ['—', '25 мВт', '200 мВт', '500 мВт', '800 мВт', 'max'];
+const bandLetter = (b: number) => String.fromCharCode(64 + b);
+
 /** Standalone page: AutoDetectVTXWizard. The same flow is embedded into /wizard via <VtxFlow/>. */
 export function VtxWizardPage() {
   const fc = useFc();
@@ -44,7 +48,9 @@ export function VtxFlow({ writeAllowed, onDone }: { writeAllowed: { ok: boolean;
   const [manualGrid, setManualGrid] = useState('');
   const [fileTable, setFileTable] = useState<{ table: number[][]; name: string; sha256: string } | null>(null);
   const [pairs, setPairs] = useState<VtxPair[]>([]);
-  const [rcChannel, setRcChannel] = useState(9);
+  const [fcMap, setFcMap] = useState<VtxPair[] | null>(null);
+  const [rcChannel, setRcChannel] = useState(12);
+  const [power, setPower] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const rawLog = useRef<RawLogEntry[]>([]);
   const ranges = useAsync(() => api<{ ranges: Range[] }>('/frequency-ranges'));
@@ -56,23 +62,43 @@ export function VtxFlow({ writeAllowed, onDone }: { writeAllowed: { ok: boolean;
     setBusy(true);
     const logStart = fc.log.length;
     try {
+      const client = await fc.ensureLink();
       push('MSP_VTX_CONFIG…');
-      const cfg = await fc.client.vtxConfig();
+      const cfg = await client.vtxConfig();
       setVtxCfg(cfg);
       push(`VTX type=${cfg.deviceType} band=${cfg.band} ch=${cfg.channel} pwr=${cfg.power} freq=${cfg.freqMhz}`);
-      if (cfg.deviceType === 0) push('FC сообщает: VTX не сконфигурирован (type=0). Проверьте, что VTX подключён к UART и в INAV выбран SmartAudio/Tramp.');
-      push('CLI vtx_info…');
-      let parsed: VtxInfo | null = null;
+      if (cfg.deviceType === 0 || cfg.deviceType === 0xff) push('FC сообщает: VTX не обнаружен. Проверьте, что VTX подключён к UART и в INAV выбран SmartAudio/Tramp.');
+      // The project firmware answers MSP2 0x2F10; only it has CLI `vtx_info`. Stock INAV would just reboot on CLI exit for nothing.
+      let projectFw = false;
       try {
-        const text = await fc.client.cli('vtx_info', 3000);
-        parsed = parseVtxInfo(text);
-        push(`vtx_info: ${parsed.name || '?'} ${parsed.protocol} ${parsed.bands}x${parsed.channels}, ${parsed.freqTable.length} частот`);
-      } catch (e) {
-        push(`vtx_info недоступен (${(e as Error).message}) — прошивка FC без vtx_info; продолжаем по MSP`);
+        const map = await client.vtxMapRead();
+        setFcMap(map);
+        projectFw = true;
+        if (map.length) { setPairs(map); setRcChannel(map[0]!.rcChannel); }
+        push(`Карта VTX в прошивке: ${map.length} пар`);
+      } catch {
+        setFcMap(null);
+        push('Прошивка без VTX map (обычная INAV) — сетка берётся из базы или вводится вручную');
       }
-      if (!fc.emulated) {
-        push('CLI exit → FC перезагружается, переподключение…');
-        await fc.reconnectAfterReboot();
+      setPower(cfg.power || null);
+      let parsed: VtxInfo | null = null;
+      if (projectFw) {
+        push('Чтение сетки VTX из прошивки (CLI vtx_info)…');
+        try {
+          const text = await client.cli('vtx_info', 3000);
+          parsed = parseVtxInfo(text);
+          push(`Сетка из прошивки: ${parsed.name || '?'} ${parsed.protocol} ${parsed.bands}x${parsed.channels}, ${parsed.freqTable.length} частот`);
+        } catch (e) {
+          push(`vtx_info недоступен (${(e as Error).message}) — продолжаем по MSP`);
+        }
+        if (!fc.emulated) {
+          push('Борт перезагружается после CLI, ждём USB…');
+          try {
+            await fc.reconnectAfterReboot();
+          } catch (e) {
+            push(`Борт не вернулся на связь (${(e as Error).message}) — данные VTX уже получены, продолжаем`);
+          }
+        }
       }
       setInfo(parsed);
       const entries: MspLogEntry[] = useFc.getState().log.slice(logStart);
@@ -129,21 +155,35 @@ export function VtxFlow({ writeAllowed, onDone }: { writeAllowed: { ok: boolean;
   }
 
   function buildPairs() {
+    if (fcMap?.length && pairs.length) { setStep(2); return; }
     const out: VtxPair[] = [];
     table.forEach((band, b) => band.forEach((f, c) => { if (out.length < 16) out.push({ band: b + 1, channel: c + 1, freqMhz: f, rcChannel, rcLevel: 1000 + out.length * 66 }); }));
     setPairs(out);
     setStep(2);
   }
 
+  /** band/channel picked from the grid → frequency follows the grid, never typed by hand */
+  function setPairBc(i: number, band: number, channel: number) {
+    const f = table[band - 1]?.[channel - 1];
+    setPairs(pairs.map((x, j) => (j === i ? { ...x, band, channel, freqMhz: f ?? x.freqMhz } : x)));
+  }
+
+  const current = vtxCfg && pairs.find((p) => p.band === vtxCfg.band && p.channel === vtxCfg.channel);
+
   async function write() {
     if (!fc.client || !writeAllowed.ok) return;
     setBusy(true);
     try {
+      const client = await fc.ensureLink();
       push('MSP2 0x2F11 VTX_MAP_WRITE…');
-      await fc.client.vtxMapWrite(pairs);
+      await client.vtxMapWrite(pairs);
+      if (power && vtxCfg && power !== vtxCfg.power && vtxCfg.deviceType !== 0 && vtxCfg.deviceType !== 0xff) {
+        push(`MSP_SET_VTX_CONFIG: мощность → ${POWER_LABEL[power]}`);
+        await client.setVtxPower(power, vtxCfg.pitMode);
+      }
       push('MSP_EEPROM_WRITE…');
-      await fc.client.eepromWrite();
-      const back = await fc.client.vtxMapRead();
+      await client.eepromWrite();
+      const back = await client.vtxMapRead();
       const same = back.length === pairs.length && back.every((p, i) => p.band === pairs[i]!.band && p.channel === pairs[i]!.channel && p.freqMhz === pairs[i]!.freqMhz && p.rcChannel === pairs[i]!.rcChannel && p.rcLevel === pairs[i]!.rcLevel);
       push(`Проверка чтением: ${back.length} пар, ${same ? 'совпадает' : 'НЕ совпадает с записанным'}`);
       if (!same) throw new Error('прочитанная карта отличается от записанной');
@@ -176,9 +216,23 @@ export function VtxFlow({ writeAllowed, onDone }: { writeAllowed: { ok: boolean;
           <div className="row" style={{ marginTop: 10 }}><button disabled={busy} onClick={() => void detect()}>Определить</button></div>
         </Card>
       )}
+      {step >= 1 && vtxCfg && (
+        <Card title="Состояние VTX на борту">
+          <table style={{ fontSize: 13 }}>
+            <tbody>
+              <tr><td>Протокол</td><td>{VTX_DEV_NAME[vtxCfg.deviceType] ?? `тип ${vtxCfg.deviceType}`}</td></tr>
+              <tr><td>Band / канал</td><td>{vtxCfg.band ? `${bandLetter(vtxCfg.band)}${vtxCfg.channel}` : '—'}</td></tr>
+              <tr><td>Частота</td><td>{vtxCfg.freqMhz || current?.freqMhz || table[vtxCfg.band - 1]?.[vtxCfg.channel - 1] || '—'} МГц</td></tr>
+              <tr><td>Мощность</td><td>{POWER_LABEL[vtxCfg.power] ?? `уровень ${vtxCfg.power}`}</td></tr>
+              <tr><td>Переключение с пульта</td><td>{fcMap === null ? <span className="warn">прошивка не умеет (нужна прошивка Молнии, шаг «Прошивка»)</span> : `карта ${fcMap.length} пар, RC CH${fcMap[0]?.rcChannel ?? rcChannel}`}</td></tr>
+              {current && <tr><td>Активная пара</td><td>{bandLetter(current.band)}{current.channel} · {current.freqMhz} МГц · CH{current.rcChannel} = {current.rcLevel} мкс</td></tr>}
+            </tbody>
+          </table>
+          <p className="muted" style={{ fontSize: 12 }}>Режим Manual/Auto задаётся на пульте (меню VTX AUTO), борт лишь выставляет band/канал по уровню CH{rcChannel}.</p>
+        </Card>
+      )}
       {step === 1 && (
         <Card title="Диапазон, модель и сетка частот">
-          {vtxCfg && <p>Текущий VTX: тип {vtxCfg.deviceType}, band {vtxCfg.band}, ch {vtxCfg.channel}, {vtxCfg.freqMhz} МГц</p>}
           <label>Диапазон</label>
           <select value={rangeId ?? ''} onChange={(e) => setRangeId(e.target.value || null)}>
             <option value="">—</option>
@@ -224,21 +278,31 @@ export function VtxFlow({ writeAllowed, onDone }: { writeAllowed: { ok: boolean;
       {step === 2 && (
         <Card title="Пары канал ↔ частота">
           <Tip>Каждой частоте назначается уровень RC-канала пульта (VtxAuto). Пульт ставит уровень на канале, FC по карте выставляет band/ch на VTX. До 16 пар; уровни должны отличаться минимум на 50 мкс.</Tip>
-          <label>RC-канал для VTX AUTO</label>
-          <input type="number" min={5} max={16} value={rcChannel} onChange={(e) => { const v = +e.target.value; setRcChannel(v); setPairs(pairs.map((p) => ({ ...p, rcChannel: v }))); }} />
+          <div className="row">
+            <label>RC-канал VTX AUTO CH<input type="number" min={5} max={16} value={rcChannel} onChange={(e) => { const v = +e.target.value; setRcChannel(v); setPairs(pairs.map((p) => ({ ...p, rcChannel: v }))); }} /></label>
+            <label>Мощность VTX
+              <select value={power ?? ''} onChange={(e) => setPower(e.target.value ? +e.target.value : null)}>
+                <option value="">не менять</option>
+                {POWER_LABEL.slice(1).map((l, i) => <option key={l} value={i + 1}>{l}</option>)}
+              </select>
+            </label>
+          </div>
           <table style={{ marginTop: 10 }}>
-            <thead><tr><th>#</th><th>Band/Ch</th><th>МГц</th><th>Уровень, мкс</th><th></th></tr></thead>
+            <thead><tr><th>#</th><th>Band</th><th>Канал</th><th>МГц</th><th>CH{rcChannel}, мкс</th><th></th></tr></thead>
             <tbody>
               {pairs.map((p, i) => (
-                <tr key={i}>
-                  <td>{i + 1}</td><td>{String.fromCharCode(64 + p.band)}{p.channel}</td>
+                <tr key={i} className={current === p ? 'ok' : ''} title={current === p ? 'сейчас активна на VTX' : ''}>
+                  <td>{i + 1}{current === p ? ' ●' : ''}</td>
+                  <td>{table.length ? <select value={p.band} onChange={(e) => setPairBc(i, +e.target.value, p.channel)}>{table.map((_, b) => <option key={b} value={b + 1}>{bandLetter(b + 1)}</option>)}</select> : bandLetter(p.band)}</td>
+                  <td>{table.length ? <select value={p.channel} onChange={(e) => setPairBc(i, p.band, +e.target.value)}>{(table[p.band - 1] ?? []).map((_, c) => <option key={c} value={c + 1}>{c + 1}</option>)}</select> : p.channel}</td>
                   <td>{p.freqMhz}</td>
-                  <td><input type="number" min={900} max={2100} value={p.rcLevel} onChange={(e) => setPairs(pairs.map((x, j) => j === i ? { ...x, rcLevel: +e.target.value } : x))} /></td>
+                  <td><input type="number" min={900} max={2100} step={50} value={p.rcLevel} onChange={(e) => setPairs(pairs.map((x, j) => j === i ? { ...x, rcLevel: +e.target.value } : x))} /></td>
                   <td><button className="secondary" onClick={() => setPairs(pairs.filter((_, j) => j !== i))}>×</button></td>
                 </tr>
               ))}
             </tbody>
           </table>
+          {pairs.length < 16 && table.length > 0 && <button className="secondary" style={{ fontSize: 12 }} onClick={() => setPairs([...pairs, { band: 1, channel: 1, freqMhz: table[0]![0]!, rcChannel, rcLevel: Math.min(2000, (pairs.at(-1)?.rcLevel ?? 950) + 66) }])}>+ пара</button>}
           {pairLevelProblem(pairs) && <p className="warn">{pairLevelProblem(pairs)}</p>}
           {!writeAllowed.ok && <p className="err">{writeAllowed.why}</p>}
           <div className="row" style={{ marginTop: 12 }}>
@@ -255,7 +319,10 @@ export function VtxFlow({ writeAllowed, onDone }: { writeAllowed: { ok: boolean;
           {!onDone && <div className="row"><button className="secondary" onClick={() => { setStep(0); setLog([]); }}>Ещё один борт</button><Link className="btn" to="/account/devices">К устройствам</Link></div>}
         </Card>
       )}
-      <Card title="Журнал"><div className="log">{log.join('\n') || 'пусто'}</div></Card>
+      <details style={{ marginTop: 8 }}>
+        <summary className="muted">Технический журнал MSP/CLI (для диагностики, {log.length} строк)</summary>
+        <div className="log">{log.join('\n') || 'пусто'}</div>
+      </details>
     </>
   );
 }

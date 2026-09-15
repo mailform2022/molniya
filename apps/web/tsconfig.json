@@ -1,5 +1,5 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "jsx": "react-jsx", "lib": ["ES2022", "DOM", "DOM.Iterable"], "types": ["vite/client", "w3c-web-serial", "vite-plugin-pwa/client"], "noEmit": true },
+  "compilerOptions": { "jsx": "react-jsx", "lib": ["ES2022", "DOM", "DOM.Iterable"], "types": ["vite/client", "w3c-web-serial", "w3c-web-usb", "vite-plugin-pwa/client"], "noEmit": true },
   "include": ["src", "vite.config.ts"]
 }

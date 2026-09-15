@@ -6,3 +6,4 @@ export * from './emulator.js';
 export * from './vtxinfo.js';
 export * from './snapshot.js';
 export * from './blackbox.js';
+export * from './image.js';

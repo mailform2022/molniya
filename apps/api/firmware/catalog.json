@@ -1,0 +1,87 @@
+{
+  "_comment": "Bundled real builds registered into firmware_versions at startup (idempotent by sha256, never published, verification=experimental). Files here are the only source of truth for the catalog bootstrap; sha256 is verified before registration.",
+  "items": [
+    {
+      "file": "MOLNIYAF405WING_inav_7.1.2_889d6f08_with_bl.hex",
+      "kind": "fc",
+      "target": "MOLNIYAF405WING",
+      "version": "7.1.2-889d6f08",
+      "sha256": "eb17b0bd39a1c190ff74e92515fc82d8df05721e82c0864690dfe7d092b843d3",
+      "section": "Молния",
+      "models": ["molniya-2", "molniya-m13", "utka"],
+      "changelog": "INAV 7.1.2, ревизия 889d6f08 (PR mailform2022/inav#2). Единый target MOLNIYAF405WING для SpeedyBee F405 Wing и CADDX F405 Wing (одинаковая распиновка). Полный образ с загрузчиком для DFU. VTX channel map (MSP2 0x2F10) и шторка OSD включены.",
+      "provenance": {
+        "repo": "github.com/mailform2022/inav",
+        "pr": "2",
+        "commit": "889d6f084b225ea8c610d7a1d730432f10518353",
+        "target": "MOLNIYAF405WING",
+        "toolchain": "gcc-arm-none-eabi 10.3-2021.10",
+        "build": "cmake, release, with bootloader"
+      }
+    },
+    {
+      "file": "edgetx_tx12mk2_VtxAuto_v3.2.bin",
+      "kind": "transmitter",
+      "target": "TX12MK2",
+      "version": "VtxAuto-3.2",
+      "sha256": "3893676b6da1b6341e9964e6c1415ccf9f6ab8d483beb2824566323dc7204439",
+      "section": "Пульты",
+      "changelog": "EdgeTX pre-3.0.0 (a51946c4) + VTX AUTO v3.2: время в меню Auto — целые секунды (1…1800), интервал считается от 10-мс тика без накопления задержки (N переключений = ровно N×интервал). Отключены HELI/GHOST/PXX1 (не влезает во flash).",
+      "provenance": {
+        "repo": "github.com/EdgeTX/edgetx",
+        "commit": "a51946c4e22e551c1d7bfdbfacf3c877a2884480",
+        "patch": "edgetx-vtx-auto-v3.2-full.patch — полный патч VTX AUTO v3.2 поверх EdgeTX a51946c4 (v3.1 пользователя + целые секунды)",
+        "toolchain": "Arm GNU Toolchain 14.2.Rel1",
+        "flags": "PCB=X7 PCBREV=TX12MK2 Release HELI=NO GHOST=NO PXX1=NO"
+      }
+    },
+    {
+      "file": "edgetx_tx12_VtxAuto_v3.2.bin",
+      "kind": "transmitter",
+      "target": "TX12",
+      "version": "VtxAuto-3.2",
+      "sha256": "db358344491fa1cb54b33232361fb6667b06afdf7b3a16df30f19b346f732df5",
+      "section": "Пульты",
+      "changelog": "EdgeTX pre-3.0.0 (a51946c4) + VTX AUTO v3.2: целые секунды, интервал без дрейфа. Отключены HELI/GHOST/PXX1.",
+      "provenance": {
+        "repo": "github.com/EdgeTX/edgetx",
+        "commit": "a51946c4e22e551c1d7bfdbfacf3c877a2884480",
+        "patch": "edgetx-vtx-auto-v3.2-full.patch — полный патч VTX AUTO v3.2 поверх EdgeTX a51946c4 (v3.1 пользователя + целые секунды)",
+        "toolchain": "Arm GNU Toolchain 14.2.Rel1",
+        "flags": "PCB=X7 PCBREV=TX12 Release HELI=NO GHOST=NO PXX1=NO"
+      }
+    },
+    {
+      "file": "edgetx_pocket_VtxAuto_v3.2.bin",
+      "kind": "transmitter",
+      "target": "POCKET",
+      "version": "VtxAuto-3.2",
+      "sha256": "067f2b774faf1cc651e36ebb18775637aa370986de6ce25473bdbe7654dc6af3",
+      "section": "Пульты",
+      "changelog": "EdgeTX pre-3.0.0 (a51946c4) + VTX AUTO v3.2: целые секунды, интервал без дрейфа. Отключены HELI/GHOST/PXX1.",
+      "provenance": {
+        "repo": "github.com/EdgeTX/edgetx",
+        "commit": "a51946c4e22e551c1d7bfdbfacf3c877a2884480",
+        "patch": "edgetx-vtx-auto-v3.2-full.patch — полный патч VTX AUTO v3.2 поверх EdgeTX a51946c4 (v3.1 пользователя + целые секунды)",
+        "toolchain": "Arm GNU Toolchain 14.2.Rel1",
+        "flags": "PCB=X7 PCBREV=POCKET Release HELI=NO GHOST=NO PXX1=NO"
+      }
+    },
+    {
+      "file": "edgetx_boxer_VtxAuto_v3.2.bin",
+      "kind": "transmitter",
+      "target": "BOXER",
+      "version": "VtxAuto-3.2",
+      "sha256": "7aeb8aaa09ad375ac9233732db066711fce4935e26c794b65030f69719ee0b3a",
+      "section": "Пульты",
+      "changelog": "EdgeTX pre-3.0.0 (a51946c4) + VTX AUTO v3.2: целые секунды, интервал без дрейфа. Отключены HELI/GHOST/PXX1.",
+      "provenance": {
+        "repo": "github.com/EdgeTX/edgetx",
+        "commit": "a51946c4e22e551c1d7bfdbfacf3c877a2884480",
+        "patch": "edgetx-vtx-auto-v3.2-full.patch — полный патч VTX AUTO v3.2 поверх EdgeTX a51946c4 (v3.1 пользователя + целые секунды)",
+        "toolchain": "Arm GNU Toolchain 14.2.Rel1",
+        "flags": "PCB=X7 PCBREV=BOXER Release HELI=NO GHOST=NO PXX1=NO"
+      }
+    }
+  ]
+}

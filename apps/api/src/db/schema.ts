@@ -206,6 +206,10 @@ export const firmwareVersions = pgTable(
     /** Crash report whose analysis this build fixes (iteration chain). */
     fixesCrashReportId: uuid('fixes_crash_report_id'),
     withdrawnReason: text('withdrawn_reason'),
+    /** Where the binary came from: source repo/branch/commit, patch sha256, toolchain, build flags. */
+    provenance: jsonb('provenance').$type<Record<string, string>>(),
+    /** Admin-attested evidence used for flight_tested when no in-system feedback exists (e.g. flights before the platform). */
+    flightEvidenceNote: text('flight_evidence_note'),
     modelIds: jsonb('model_ids').$type<string[]>().default([]),
     createdBy: uuid('created_by').references(() => users.id),
     createdAt: createdAt()
@@ -260,6 +264,8 @@ export const boardSnapshots = pgTable(
     imageSha256: varchar('image_sha256', { length: 64 }),
     imageSizeBytes: integer('image_size_bytes'),
     imageSource: varchar('image_source', { length: 32 }), // dfu-util | stm32cubeprog | st-link | other
+    /** static analysis of the dump (build strings, config sector, warnings) — see @vtx/msp analyzeFirmwareImage */
+    imageInfo: jsonb('image_info').$type<Record<string, unknown>>(),
     note: text('note'),
     createdAt: createdAt()
   },

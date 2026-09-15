@@ -1,6 +1,7 @@
 /** INAV CLI diff parser: detects unknown commands and conflicting `set` values. */
 
 const KNOWN = new Set([
+  'batch', 'blackbox',
   'set', 'feature', 'beeper', 'map', 'serial', 'aux', 'adjrange', 'rxrange', 'servo', 'smix', 'mmix', 'osd_layout', 'led', 'color', 'mode_color',
   'logic', 'gvar', 'pid', 'wp', 'safehome', 'fwapproach', 'geozone', 'temp_sensor', 'vtxtable', 'timer_output_mode', 'resource', 'profile',
   'battery_profile', 'mixer_profile', 'control_profile', 'save', 'defaults', 'diff', 'dump', 'version', 'exit', 'ezTune', 'vtx_info'

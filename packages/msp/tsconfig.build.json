@@ -4,7 +4,7 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "lib": ["ES2022", "DOM"],
-    "types": ["node", "w3c-web-serial"],
+    "types": ["node", "w3c-web-serial", "w3c-web-usb"],
     "outDir": "dist",
     "rootDir": "src",
     "declaration": true,

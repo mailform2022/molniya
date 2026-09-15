@@ -69,7 +69,11 @@ export async function buildApp() {
 
   app.setErrorHandler((err, req, reply) => {
     const e = err as Error & { statusCode?: number; validation?: unknown };
-    if (e.validation) return reply.code(400).send({ success: false, error: 'validation', details: e.validation });
+    if (e.validation) {
+      const v = e.validation as Array<{ instancePath?: string; path?: Array<string | number>; message?: string }>;
+      const hint = v.map((x) => `${(x.instancePath ?? (x.path ?? []).join('.')).replace(/^\//, '') || 'поле'}: ${x.message ?? 'неверное значение'}`).join('; ');
+      return reply.code(400).send({ success: false, error: 'validation', hint, details: e.validation });
+    }
     const status = e.statusCode ?? 500;
     if (status >= 500) req.log.error(e);
     reply.code(status).send({ success: false, error: status >= 500 ? 'internal' : e.message, telegram: status >= 500 ? env.TELEGRAM_CONTACT : undefined });
