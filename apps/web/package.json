@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "build": "pnpm --filter @vtx/msp build && tsc --noEmit -p tsconfig.json && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "pnpm --filter @vtx/msp build && tsc --noEmit -p tsconfig.json",
     "lint": "eslint src",
     "test": "vitest run"
   },
