@@ -213,8 +213,32 @@ export const adminRoutes: FastifyPluginAsyncZod = async (app) => {
       if (part.type === 'file') file = { name: part.filename, buf: await part.toBuffer() };
       else fields[part.fieldname] = String(part.value);
     }
-    const meta = z.object({ kind: z.enum(['fc', 'transmitter', 'configurator']), target: z.string().max(64), version: z.string().max(32), changelog: z.string().optional(), isPublished: z.coerce.boolean().default(false), modelIds: z.string().optional() }).safeParse(fields);
+    // Upload never publishes: isPublished/flight_tested go through the PATCH gate below.
+    const meta = z
+      .object({
+        kind: z.enum(['fc', 'transmitter', 'configurator']),
+        target: z.string().min(1).max(64),
+        version: z.string().min(1).max(32),
+        changelog: z.string().optional(),
+        section: z.string().max(64).optional(),
+        verification: z.enum(['experimental', 'diagnostic']).default('experimental'),
+        provenance: z
+          .string()
+          .optional()
+          .transform((s, ctx) => {
+            if (!s) return undefined;
+            const parsed = z.record(z.string(), z.string()).safeParse((() => { try { return JSON.parse(s); } catch { return null; } })());
+            if (!parsed.success) { ctx.addIssue({ code: 'custom', message: 'provenance must be a JSON object of strings' }); return z.NEVER; }
+            return parsed.data;
+          }),
+        modelIds: z.string().optional()
+      })
+      .safeParse(fields);
     if (!meta.success || !file) return reply.code(400).send({ success: false, error: 'bad_request', issues: meta.success ? ['file required'] : meta.error.issues });
+    if (file.buf.length < 1024) return reply.code(400).send({ success: false, error: 'file_too_small', hint: 'Файл меньше 1 КБ — это не прошивка.' });
+    const sha256 = createHash('sha256').update(file.buf).digest('hex');
+    const [dup] = await app.db.select({ id: schema.firmwareVersions.id }).from(schema.firmwareVersions).where(eq(schema.firmwareVersions.sha256, sha256));
+    if (dup) return reply.code(409).send({ success: false, error: 'duplicate_file', hint: `Такой файл уже загружен (${dup.id}).` });
     const dir = path.join(env.FIRMWARE_DIR, meta.data.kind, meta.data.target);
     await mkdir(dir, { recursive: true });
     const safeName = file.name.replace(/[^A-Za-z0-9._-]/g, '_');
@@ -222,18 +246,20 @@ export const adminRoutes: FastifyPluginAsyncZod = async (app) => {
     await writeFile(filePath, file.buf);
     const [fw] = await app.db
       .insert(schema.firmwareVersions)
-      .values({ ...meta.data, fileName: safeName, filePath, sha256: createHash('sha256').update(file.buf).digest('hex'), sizeBytes: file.buf.length, modelIds: meta.data.modelIds ? meta.data.modelIds.split(',') : [], createdBy: req.user.sub })
+      .values({ ...meta.data, isPublished: false, fileName: safeName, filePath, sha256, sizeBytes: file.buf.length, modelIds: meta.data.modelIds ? meta.data.modelIds.split(',').filter(Boolean) : [], createdBy: req.user.sub })
       .returning();
-    await app.audit(req, 'admin.firmware_upload', fw!.id, { target: fw!.target, version: fw!.version });
+    await app.audit(req, 'admin.firmware_upload', fw!.id, { target: fw!.target, version: fw!.version, sha256, verification: fw!.verification });
     return reply.code(201).send({ success: true, firmware: fw });
   });
   /**
    * Release gate: isPublished=true requires verification=flight_tested and at least one crash report with
    * userVerdict=ok when the build fixes a crash. `withdrawn` unpublishes immediately.
+   * flight_tested needs in-system evidence (flew_ok feedback / confirmed crash fix) or an admin-attested
+   * `flightEvidenceNote` (who flew what and when) — the note is stored on the row and in the audit log.
    */
   app.patch(
     '/firmware/:id',
-    { schema: { params: uuid, body: z.object({ isPublished: z.boolean().optional(), changelog: z.string().optional(), modelIds: z.array(z.string()).optional(), verification: z.enum(['experimental', 'diagnostic', 'flight_tested', 'withdrawn']).optional(), section: z.string().max(64).nullable().optional(), fixesCrashReportId: z.string().uuid().nullable().optional(), withdrawnReason: z.string().max(2000).optional() }) } },
+    { schema: { params: uuid, body: z.object({ isPublished: z.boolean().optional(), changelog: z.string().optional(), modelIds: z.array(z.string()).optional(), verification: z.enum(['experimental', 'diagnostic', 'flight_tested', 'withdrawn']).optional(), section: z.string().max(64).nullable().optional(), fixesCrashReportId: z.string().uuid().nullable().optional(), withdrawnReason: z.string().max(2000).optional(), flightEvidenceNote: z.string().min(20).max(2000).optional(), provenance: z.record(z.string(), z.string()).optional() }) } },
     async (req, reply) => {
       const [fw] = await app.db.select().from(schema.firmwareVersions).where(eq(schema.firmwareVersions.id, req.params.id));
       if (!fw) return reply.code(404).send({ success: false, error: 'not_found' });
@@ -245,7 +271,7 @@ export const adminRoutes: FastifyPluginAsyncZod = async (app) => {
       if (next.verification === 'flight_tested' && fw.verification !== 'flight_tested') {
         const [ok] = await app.db.select({ n: count() }).from(schema.firmwareFeedback).where(and(eq(schema.firmwareFeedback.firmwareId, fw.id), eq(schema.firmwareFeedback.outcome, 'flew_ok')));
         const [crashOk] = next.fixesCrashReportId ? await app.db.select({ v: schema.crashReports.userVerdict }).from(schema.crashReports).where(eq(schema.crashReports.id, next.fixesCrashReportId)) : [];
-        if ((ok?.n ?? 0) === 0 && crashOk?.v !== 'ok') return reply.code(409).send({ success: false, error: 'no_flight_evidence', hint: 'Ни одного отзыва «отлетал нормально» по этой сборке и нет подтверждённого исправления крэша. Нельзя пометить как проверенную в полёте.' });
+        if ((ok?.n ?? 0) === 0 && crashOk?.v !== 'ok' && !req.body.flightEvidenceNote) return reply.code(409).send({ success: false, error: 'no_flight_evidence', hint: 'Ни одного отзыва «отлетал нормально» по этой сборке и нет подтверждённого исправления крэша. Укажите flightEvidenceNote (кто, на чём и когда летал), если полёты были вне сервиса.' });
       }
       if (next.isPublished && !fw.isPublished) {
         if (next.verification !== 'flight_tested') return reply.code(409).send({ success: false, error: 'not_flight_tested', hint: 'Публикация разрешена только для verification=flight_tested.' });
@@ -254,9 +280,9 @@ export const adminRoutes: FastifyPluginAsyncZod = async (app) => {
           if (cr?.v !== 'ok') return reply.code(409).send({ success: false, error: 'crash_fix_not_confirmed', hint: 'Пользователь ещё не подтвердил успешный полёт на исправлении.' });
         }
       }
-      const { isPublished, changelog, modelIds, verification, section, fixesCrashReportId, withdrawnReason } = next;
-      await app.db.update(schema.firmwareVersions).set({ isPublished, changelog, modelIds, verification, section, fixesCrashReportId, withdrawnReason }).where(eq(schema.firmwareVersions.id, req.params.id));
-      await app.audit(req, 'admin.firmware_update', req.params.id, { verification: next.verification, isPublished: next.isPublished });
+      const { isPublished, changelog, modelIds, verification, section, fixesCrashReportId, withdrawnReason, flightEvidenceNote, provenance } = next;
+      await app.db.update(schema.firmwareVersions).set({ isPublished, changelog, modelIds, verification, section, fixesCrashReportId, withdrawnReason, flightEvidenceNote, provenance }).where(eq(schema.firmwareVersions.id, req.params.id));
+      await app.audit(req, 'admin.firmware_update', req.params.id, { verification: next.verification, isPublished: next.isPublished, flightEvidenceNote: req.body.flightEvidenceNote });
       if (next.isPublished && !fw.isPublished) await app.publish({ channel: 'firmware', type: 'firmware.published', payload: { id: req.params.id } });
       if (next.verification === 'withdrawn' && fw.verification !== 'withdrawn') await app.publish({ channel: 'firmware', type: 'firmware.withdrawn', payload: { id: req.params.id, reason: next.withdrawnReason } });
       return { success: true };

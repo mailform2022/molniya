@@ -29,6 +29,13 @@
       "when": 1789472943463,
       "tag": "0003_build_sets_feedback",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1789481690256,
+      "tag": "0004_firmware_provenance",
+      "breakpoints": true
     }
   ]
 }
