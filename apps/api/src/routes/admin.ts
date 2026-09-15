@@ -227,11 +227,74 @@ export const adminRoutes: FastifyPluginAsyncZod = async (app) => {
     await app.audit(req, 'admin.firmware_upload', fw!.id, { target: fw!.target, version: fw!.version });
     return reply.code(201).send({ success: true, firmware: fw });
   });
-  app.patch('/firmware/:id', { schema: { params: uuid, body: z.object({ isPublished: z.boolean().optional(), changelog: z.string().optional(), modelIds: z.array(z.string()).optional() }) } }, async (req) => {
-    await app.db.update(schema.firmwareVersions).set(req.body).where(eq(schema.firmwareVersions.id, req.params.id));
-    if (req.body.isPublished) await app.publish({ channel: 'firmware', type: 'firmware.published', payload: { id: req.params.id } });
+  /**
+   * Release gate: isPublished=true requires verification=flight_tested and at least one crash report with
+   * userVerdict=ok when the build fixes a crash. `withdrawn` unpublishes immediately.
+   */
+  app.patch(
+    '/firmware/:id',
+    { schema: { params: uuid, body: z.object({ isPublished: z.boolean().optional(), changelog: z.string().optional(), modelIds: z.array(z.string()).optional(), verification: z.enum(['experimental', 'diagnostic', 'flight_tested', 'withdrawn']).optional(), section: z.string().max(64).nullable().optional(), fixesCrashReportId: z.string().uuid().nullable().optional(), withdrawnReason: z.string().max(2000).optional() }) } },
+    async (req, reply) => {
+      const [fw] = await app.db.select().from(schema.firmwareVersions).where(eq(schema.firmwareVersions.id, req.params.id));
+      if (!fw) return reply.code(404).send({ success: false, error: 'not_found' });
+      const next = { ...fw, ...req.body };
+      if (next.verification === 'withdrawn') {
+        if (!req.body.withdrawnReason && !fw.withdrawnReason) return reply.code(400).send({ success: false, error: 'withdrawn_reason_required' });
+        next.isPublished = false;
+      }
+      if (next.isPublished && !fw.isPublished) {
+        if (next.verification !== 'flight_tested') return reply.code(409).send({ success: false, error: 'not_flight_tested', hint: 'Публикация разрешена только для verification=flight_tested.' });
+        if (next.fixesCrashReportId) {
+          const [cr] = await app.db.select({ v: schema.crashReports.userVerdict }).from(schema.crashReports).where(eq(schema.crashReports.id, next.fixesCrashReportId));
+          if (cr?.v !== 'ok') return reply.code(409).send({ success: false, error: 'crash_fix_not_confirmed', hint: 'Пользователь ещё не подтвердил успешный полёт на исправлении.' });
+        }
+      }
+      const { isPublished, changelog, modelIds, verification, section, fixesCrashReportId, withdrawnReason } = next;
+      await app.db.update(schema.firmwareVersions).set({ isPublished, changelog, modelIds, verification, section, fixesCrashReportId, withdrawnReason }).where(eq(schema.firmwareVersions.id, req.params.id));
+      await app.audit(req, 'admin.firmware_update', req.params.id, { verification: next.verification, isPublished: next.isPublished });
+      if (next.isPublished && !fw.isPublished) await app.publish({ channel: 'firmware', type: 'firmware.published', payload: { id: req.params.id } });
+      if (next.verification === 'withdrawn' && fw.verification !== 'withdrawn') await app.publish({ channel: 'firmware', type: 'firmware.withdrawn', payload: { id: req.params.id, reason: next.withdrawnReason } });
+      return { success: true };
+    }
+  );
+
+  // ---- /admin/verified-targets: which FC target + INAV version are flight-verified ----
+  const vtBody = z.object({ fcTarget: z.string().max(64), inavVersion: z.string().max(32), boardModelId: z.string().uuid().nullable().optional(), status: z.enum(['verified', 'experimental', 'banned']).default('verified'), evidence: z.string().max(2000).optional() });
+  app.get('/verified-targets', async () => ({ success: true, targets: await app.db.select().from(schema.verifiedTargets) }));
+  app.post('/verified-targets', { schema: { body: vtBody } }, async (req, reply) => {
+    const [t] = await app.db.insert(schema.verifiedTargets).values({ ...req.body, fcTarget: req.body.fcTarget.toUpperCase(), createdBy: req.user.sub }).onConflictDoUpdate({ target: [schema.verifiedTargets.fcTarget, schema.verifiedTargets.inavVersion], set: { status: req.body.status, evidence: req.body.evidence, boardModelId: req.body.boardModelId } }).returning();
+    await app.audit(req, 'admin.verified_target', t!.id, { fcTarget: t!.fcTarget, inavVersion: t!.inavVersion, status: t!.status });
+    return reply.code(201).send({ success: true, target: t });
+  });
+  app.delete('/verified-targets/:id', { schema: { params: uuid } }, async (req) => {
+    await app.db.delete(schema.verifiedTargets).where(eq(schema.verifiedTargets.id, req.params.id));
     return { success: true };
   });
+
+  // ---- /admin/crash-reports: review analysis, propose a fix (firmware and/or diff) ----
+  app.get('/crash-reports', async () => ({ success: true, reports: await app.db.select().from(schema.crashReports).orderBy(desc(schema.crashReports.createdAt)) }));
+  app.get('/crash-reports/:id', { schema: { params: uuid } }, async (req, reply) => {
+    const [r] = await app.db.select().from(schema.crashReports).where(eq(schema.crashReports.id, req.params.id));
+    if (!r) return reply.code(404).send({ success: false, error: 'not_found' });
+    const snapshot = r.snapshotId ? (await app.db.select().from(schema.boardSnapshots).where(eq(schema.boardSnapshots.id, r.snapshotId)))[0] : null;
+    const build = r.diagnosticBuildId ? (await app.db.select().from(schema.diagnosticBuilds).where(eq(schema.diagnosticBuilds.id, r.diagnosticBuildId)))[0] : null;
+    return { success: true, report: r, snapshot, build };
+  });
+  app.post('/crash-reports/:id/fix', { schema: { params: uuid, body: z.object({ fixFirmwareId: z.string().uuid().nullable().optional(), fixDiffContent: z.string().max(256 * 1024).nullable().optional(), adminNote: z.string().max(4000).optional() }) } }, async (req, reply) => {
+    if (!req.body.fixFirmwareId && !req.body.fixDiffContent) return reply.code(400).send({ success: false, error: 'fix_required' });
+    if (req.body.fixDiffContent) {
+      const a = analyzeDiff(req.body.fixDiffContent);
+      if (a.unknown.length) return reply.code(400).send({ success: false, error: 'diff_unknown_commands', unknown: a.unknown });
+    }
+    await app.db.update(schema.crashReports).set({ ...req.body, status: 'fix_proposed', userVerdict: null, updatedAt: new Date() }).where(eq(schema.crashReports.id, req.params.id));
+    await app.audit(req, 'admin.crash_fix', req.params.id, { firmware: req.body.fixFirmwareId ?? null });
+    return { success: true };
+  });
+  app.patch('/crash-reports/:id', { schema: { params: uuid, body: z.object({ status: z.enum(['analyzed', 'fix_proposed', 'fixed', 'closed']).optional(), adminNote: z.string().max(4000).optional() }) } }, async (req) => {
+    await app.db.update(schema.crashReports).set({ ...req.body, updatedAt: new Date() }).where(eq(schema.crashReports.id, req.params.id));
+    return { success: true };
+  });
+  app.get('/snapshots', async () => ({ success: true, snapshots: (await app.db.select().from(schema.boardSnapshots).orderBy(desc(schema.boardSnapshots.createdAt)).limit(200)).map(({ diffAll, statusText, ...s }) => ({ ...s, hasDiff: Boolean(diffAll), hasStatus: Boolean(statusText) })) }));
 
   // ---- /admin/vtx-models, /admin/vtx-photos, ranges ----
   const vtxBody = z.object({ name: z.string().max(128), manufacturer: z.string().max(128).optional(), rangeId: z.string().uuid().nullable().optional(), protocol: z.string().max(32).default('smartaudio'), bands: z.number().int(), channels: z.number().int(), freqTable: z.array(z.array(z.number().int())), powerLevels: z.array(z.number()).optional(), isDisabled: z.boolean().optional(), flagged: z.boolean().optional() });
@@ -242,6 +305,19 @@ export const adminRoutes: FastifyPluginAsyncZod = async (app) => {
     return { success: true };
   });
   app.post('/vtx-photos', { schema: { body: z.object({ vtxModelId: z.string().uuid(), fcTarget: z.string(), imagePath: z.string(), annotations: z.array(z.object({ x: z.number(), y: z.number(), label: z.string() })).default([]) }) } }, async (req, reply) => reply.code(201).send({ success: true, photo: (await app.db.insert(schema.vtxConnectionPhotos).values(req.body).returning())[0] }));
+  // user-uploaded VTX identification photos: edit caption/annotations, hide, reorder, re-link to a model
+  app.get('/vtx-model-photos', { schema: { querystring: z.object({ vtxModelId: z.string().uuid().optional(), submissionId: z.string().uuid().optional() }) } }, async (req) => {
+    const where = req.query.vtxModelId ? eq(schema.vtxPhotos.vtxModelId, req.query.vtxModelId) : req.query.submissionId ? eq(schema.vtxPhotos.submissionId, req.query.submissionId) : undefined;
+    return { success: true, photos: await app.db.select().from(schema.vtxPhotos).where(where).orderBy(schema.vtxPhotos.sortOrder, desc(schema.vtxPhotos.createdAt)).limit(500) };
+  });
+  app.patch('/vtx-model-photos/:id', { schema: { params: uuid, body: z.object({ caption: z.string().max(255).nullable().optional(), annotations: z.array(z.object({ x: z.number(), y: z.number(), label: z.string() })).optional(), isHidden: z.boolean().optional(), sortOrder: z.number().int().optional(), vtxModelId: z.string().uuid().nullable().optional() }) } }, async (req) => {
+    await app.db.update(schema.vtxPhotos).set(req.body).where(eq(schema.vtxPhotos.id, req.params.id));
+    return { success: true };
+  });
+  app.delete('/vtx-model-photos/:id', { schema: { params: uuid } }, async (req) => {
+    await app.db.delete(schema.vtxPhotos).where(eq(schema.vtxPhotos.id, req.params.id));
+    return { success: true };
+  });
   app.put('/frequency-ranges/:id', { schema: { params: uuid, body: z.object({ status: z.enum(['active', 'in_dev', 'coming_soon']).optional(), isDefault: z.boolean().optional(), name: z.string().optional() }) } }, async (req) => {
     if (req.body.isDefault) await app.db.update(schema.frequencyRanges).set({ isDefault: false });
     await app.db.update(schema.frequencyRanges).set(req.body).where(eq(schema.frequencyRanges.id, req.params.id));

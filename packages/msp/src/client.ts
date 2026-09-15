@@ -1,4 +1,4 @@
-import { encode, MspMessage, MspParser, PayloadReader, PayloadWriter } from './codec.js';
+import { encode, encodeV2, MspMessage, MspParser, PayloadReader, PayloadWriter } from './codec.js';
 import { AuthStatus, MSP, MSP2, MSP2_VTX, VTX_MAP_MAX_PAIRS, VtxPair } from './codes.js';
 import type { Transport } from './transport.js';
 
@@ -9,6 +9,10 @@ export interface MspLogEntry {
   bytes?: number;
   text: string;
 }
+
+export interface DataflashSummary { ready: boolean; supported: boolean; sectors: number; totalSize: number; usedSize: number }
+export interface SdcardSummary { supported: boolean; state: number; lastError: number; freeSizeKb: number; totalSizeKb: number }
+export interface BlackboxConfig { supported: boolean; device: number; rateNum: number; rateDenom: number; includeFlags: number }
 
 export interface MspClientOptions {
   timeoutMs?: number; // spec: retry on 100 ms timeout
@@ -68,12 +72,12 @@ export class MspClient {
   }
 
   /** Send a command and wait for its reply. Serialised: one in-flight request at a time. */
-  request(code: number, payload?: Uint8Array, timeoutMs = this.timeoutMs): Promise<MspMessage> {
+  request(code: number, payload?: Uint8Array, timeoutMs = this.timeoutMs, forceV2 = false): Promise<MspMessage> {
     const run = async (): Promise<MspMessage> => {
       let lastErr: Error = new Error('no attempts');
       for (let attempt = 0; attempt <= this.retries; attempt++) {
         try {
-          return await this.once(code, payload, timeoutMs);
+          return await this.once(code, payload, timeoutMs, forceV2);
         } catch (e) {
           lastErr = e as Error;
           if (!/timeout/.test(lastErr.message)) throw lastErr;
@@ -87,14 +91,14 @@ export class MspClient {
     return p;
   }
 
-  private once(code: number, payload: Uint8Array | undefined, timeoutMs: number): Promise<MspMessage> {
+  private once(code: number, payload: Uint8Array | undefined, timeoutMs: number, forceV2: boolean): Promise<MspMessage> {
     return new Promise<MspMessage>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(code);
         reject(new Error(`timeout waiting for 0x${code.toString(16)}`));
       }, timeoutMs);
       this.pending.set(code, { resolve, reject, timer });
-      const frame = encode(code, payload);
+      const frame = forceV2 ? encodeV2(code, payload) : encode(code, payload);
       this.log({ t: Date.now(), dir: 'tx', code, bytes: payload?.length ?? 0, text: 'send' });
       this.transport.write(frame).catch((e) => {
         clearTimeout(timer);
@@ -155,6 +159,65 @@ export class MspClient {
     await this.request(MSP.EEPROM_WRITE, undefined, 1500);
   }
 
+  // ---- blackbox storage (standard INAV MSP) ----
+
+  /** MSP_DATAFLASH_SUMMARY: onboard SPI flash used by blackbox. */
+  async dataflashSummary(): Promise<DataflashSummary> {
+    const r = new PayloadReader((await this.request(MSP.DATAFLASH_SUMMARY)).payload);
+    const flags = r.u8();
+    return { ready: (flags & 1) !== 0, supported: (flags & 2) !== 0, sectors: r.u32(), totalSize: r.u32(), usedSize: r.u32() };
+  }
+
+  /** MSP_SDCARD_SUMMARY: SD card slot state. state: 0 not present, 1 fatal, 2 card init, 3 fs init, 4 ready. */
+  async sdcardSummary(): Promise<SdcardSummary> {
+    const r = new PayloadReader((await this.request(MSP.SDCARD_SUMMARY)).payload);
+    const flags = r.u8();
+    return { supported: (flags & 1) !== 0, state: r.u8(), lastError: r.u8(), freeSizeKb: r.u32(), totalSizeKb: r.u32() };
+  }
+
+  /** MSP2_BLACKBOX_CONFIG: device 0 none, 1 flash, 2 sdcard, 3 serial. */
+  async blackboxConfig(): Promise<BlackboxConfig> {
+    const r = new PayloadReader((await this.request(MSP2.BLACKBOX_CONFIG)).payload);
+    return { supported: r.u8() === 1, device: r.u8(), rateNum: r.u16(), rateDenom: r.u16(), includeFlags: r.remaining >= 4 ? r.u32() : 0 };
+  }
+
+  async setBlackboxConfig(cfg: { device: number; rateNum: number; rateDenom: number; includeFlags?: number }): Promise<void> {
+    const w = new PayloadWriter().u8(cfg.device).u16(cfg.rateNum).u16(cfg.rateDenom);
+    if (cfg.includeFlags !== undefined) w.u32(cfg.includeFlags);
+    await this.request(MSP2.SET_BLACKBOX_CONFIG, w.build(), 500);
+  }
+
+  /** MSP_DATAFLASH_READ one chunk; the FC echoes the address and returns up to `size` bytes. */
+  async dataflashRead(address: number, size = 4096): Promise<Uint8Array> {
+    // v2 framing: v1 payloads are capped at 255 bytes, which would make a flash dump painfully slow.
+    const m = await this.request(MSP.DATAFLASH_READ, new PayloadWriter().u32(address).u16(size).build(), 3000, true);
+    const r = new PayloadReader(m.payload);
+    const addr = r.u32();
+    if (addr !== address) throw new Error(`dataflash read: address mismatch ${addr} != ${address}`);
+    return r.bytes(r.remaining);
+  }
+
+  /** Download the used part of onboard flash (blackbox logs). Returns raw .bbl bytes. */
+  async downloadDataflash(onProgress?: (done: number, total: number) => void, chunk = 4096): Promise<Uint8Array> {
+    const s = await this.dataflashSummary();
+    if (!s.supported) throw new Error('На этом FC нет встроенной flash для чёрного ящика');
+    const total = s.usedSize;
+    const out = new Uint8Array(total);
+    let off = 0;
+    while (off < total) {
+      const part = await this.dataflashRead(off, Math.min(chunk, total - off));
+      if (!part.length) break;
+      out.set(part, off);
+      off += part.length;
+      onProgress?.(off, total);
+    }
+    return out.subarray(0, off);
+  }
+
+  async dataflashErase(): Promise<void> {
+    await this.request(MSP.DATAFLASH_ERASE, undefined, 5000);
+  }
+
   async reboot(): Promise<void> {
     await this.transport.write(encode(MSP.REBOOT));
   }
@@ -210,28 +273,68 @@ export class MspClient {
 
   // ---- CLI over the same serial link ----
 
-  /** Enter CLI ('#'), run a command, collect until prompt, then `exit`. */
-  async cli(command: string, timeoutMs = 2000): Promise<string> {
+  /**
+   * Open a CLI session ('#'). INAV reboots the FC on `exit` and on `save`, so callers batch
+   * commands in one session and leave once. While a session is open MSP requests are not sent.
+   */
+  async cliSession(): Promise<CliSession> {
     const dec = new TextDecoder();
+    const enc = new TextEncoder();
     let buf = '';
     const off = this.transport.onData((c) => {
       buf += dec.decode(c, { stream: true });
     });
-    try {
-      await this.transport.write(new TextEncoder().encode('#'));
-      await new Promise((r) => setTimeout(r, 200));
-      buf = '';
-      await this.transport.write(new TextEncoder().encode(command + '\n'));
+    const waitPrompt = async (timeoutMs: number) => {
       const start = Date.now();
       while (Date.now() - start < timeoutMs) {
-        await new Promise((r) => setTimeout(r, 50));
-        if (/\n# ?$/.test(buf)) break;
+        await new Promise((r) => setTimeout(r, 30));
+        if (/(^|\n)# ?$/.test(buf)) return true;
       }
-      return buf.replace(/\n# ?$/, '').replace(new RegExp('^' + command.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\r?\\n'), '');
-    } finally {
+      return false;
+    };
+    const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    let closed = false;
+    const session: CliSession = {
+      run: async (command, timeoutMs = 2000) => {
+        if (closed) throw new Error('CLI session closed');
+        buf = '';
+        this.log({ t: Date.now(), dir: 'tx', text: `cli> ${command}` });
+        await this.transport.write(enc.encode(command + '\n'));
+        const ok = await waitPrompt(timeoutMs);
+        if (!ok) throw new Error(`CLI timeout: ${command}`);
+        const out = buf.replace(/(^|\n)# ?$/, '').replace(new RegExp('^' + escape(command) + '\\r?\\n'), '');
+        this.log({ t: Date.now(), dir: 'rx', bytes: out.length, text: `cli< ${command}` });
+        return out;
+      },
+      end: async (mode = 'exit') => {
+        if (closed) return;
+        closed = true;
+        off();
+        await this.transport.write(enc.encode(mode + '\n')).catch(() => undefined);
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    };
+    await this.transport.write(enc.encode('#'));
+    if (!(await waitPrompt(1500))) {
       off();
-      await this.transport.write(new TextEncoder().encode('exit\n')).catch(() => undefined);
-      await new Promise((r) => setTimeout(r, 300));
+      throw new Error('CLI: нет приглашения "#" (прошивка не отвечает на CLI)');
+    }
+    return session;
+  }
+
+  /** One-shot CLI command; ends with `exit` (FC reboots). Prefer `cliSession` for several commands. */
+  async cli(command: string, timeoutMs = 2000): Promise<string> {
+    const s = await this.cliSession();
+    try {
+      return await s.run(command, timeoutMs);
+    } finally {
+      await s.end('exit');
     }
   }
+}
+
+export interface CliSession {
+  run(command: string, timeoutMs?: number): Promise<string>;
+  /** `exit` — reboot without saving; `save` — write settings and reboot. */
+  end(mode?: 'exit' | 'save'): Promise<void>;
 }

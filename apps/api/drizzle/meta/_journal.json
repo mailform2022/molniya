@@ -8,6 +8,13 @@
       "when": 1789373804601,
       "tag": "0000_watery_elektra",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1789466678169,
+      "tag": "0001_snapshots_diagnostics",
+      "breakpoints": true
     }
   ]
 }

@@ -104,6 +104,15 @@ export async function seed(db: Db): Promise<void> {
   ];
   for (const [key, value, description] of flags) await db.insert(schema.featureFlags).values({ key, value, description }).onConflictDoNothing();
 
+  // Flight-verification status per FC target: Molniya boards flown on 7.1.x; «Утка» crashed → experimental until fixed.
+  await db
+    .insert(schema.verifiedTargets)
+    .values([
+      { fcTarget: 'CADDXF405_WING', inavVersion: '7.1', status: 'verified', evidence: 'Молния 2 / M13: рабочие борта на INAV 7.1.x (inav PR #2)' },
+      { fcTarget: 'SPEEDYBEEF405WING', inavVersion: '7.1', status: 'experimental', evidence: '«Утка»: падение в полёте, blackbox не работал, dataflash отсутствует — требуется диагностическая итерация' }
+    ])
+    .onConflictDoNothing();
+
   const cms: Array<[string, unknown]> = [
     ['home.hero', { title: 'VTX Services', subtitle: 'Прошивка и настройка полётных контроллеров и пультов: VTX AUTO, diff, автопрошивка', cta: 'Подключить борт' }],
     ['help.web_serial', { text: 'Нужен Chrome/Edge 89+ (на Android — Chrome 148+ и USB OTG). Firefox и Safari не поддерживают Web Serial.' }],
