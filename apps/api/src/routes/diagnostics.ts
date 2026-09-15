@@ -91,7 +91,7 @@ export const diagnosticsRoutes: FastifyPluginAsyncZod = async (app) => {
       if (part.type === 'file') file = { name: part.filename, buf: await part.toBuffer() };
       else if (part.fieldname === 'source') source = String(part.value).slice(0, 32);
     }
-    if (!file || file.buf.length < 1024) return reply.code(400).send({ success: false, error: 'image_required' });
+    if (!file || file.buf.length < 1024) return reply.code(400).send({ success: false, error: 'image_required', hint: 'Прикрепите raw-дамп flash (.bin, обычно 1 МиБ для F405). Файл меньше 1 КиБ образом прошивки быть не может.' });
     const info = analyzeFirmwareImage(new Uint8Array(file.buf.buffer, file.buf.byteOffset, file.buf.byteLength));
     if (!info.vectorTableOk) return reply.code(400).send({ success: false, error: 'not_a_flash_dump', hint: info.warnings.join(' ') });
     const mismatch = imageMatchesBoard(info, { target: s.fcTarget, version: s.fcVersion, variant: s.fcVariant });

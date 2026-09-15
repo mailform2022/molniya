@@ -27,7 +27,7 @@ export function TransmitterPage() {
 export function TransmitterPanel({ embedded = false, onNext }: { embedded?: boolean; onNext?: () => void }) {
   const w = useWizard();
   const fc = useFc();
-  const { notify, access, user } = useStore();
+  const { notify, access, user, refreshAccess } = useStore();
   const models = useAsync(() => api<{ transmitters: TxModel[] }>('/models'));
   const profiles = useAsync(() => api<{ profiles: VtxProfile[] }>('/vtx-profiles'));
   const vtxModels = useAsync(() => api<{ models: VtxModel[] }>('/vtx-models'));
@@ -97,6 +97,7 @@ export function TransmitterPanel({ embedded = false, onNext }: { embedded?: bool
     setBusy(true);
     try {
       await api('/devices', { method: 'POST', json: { kind: 'transmitter', uid: txUid.trim().toLowerCase(), name: w.tx.name, modelId: model?.id } });
+      await refreshAccess();
       notify('Пульт зарегистрирован — VTX AUTO активен на нём по тарифу');
     } catch (e) {
       notify(e instanceof ApiError && e.body.error === 'device_limit_reached' ? `Лимит пультов по тарифу (${access?.device_limit ?? 1}) исчерпан — докупите «+1 пульт» в кабинете` : (e as Error).message);

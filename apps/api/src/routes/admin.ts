@@ -273,6 +273,8 @@ export const adminRoutes: FastifyPluginAsyncZod = async (app) => {
         const [crashOk] = next.fixesCrashReportId ? await app.db.select({ v: schema.crashReports.userVerdict }).from(schema.crashReports).where(eq(schema.crashReports.id, next.fixesCrashReportId)) : [];
         if ((ok?.n ?? 0) === 0 && crashOk?.v !== 'ok' && !req.body.flightEvidenceNote) return reply.code(409).send({ success: false, error: 'no_flight_evidence', hint: 'Ни одного отзыва «отлетал нормально» по этой сборке и нет подтверждённого исправления крэша. Укажите flightEvidenceNote (кто, на чём и когда летал), если полёты были вне сервиса.' });
       }
+      // publication is tied to flight_tested: leaving that state (for any reason) unpublishes
+      if (next.verification !== 'flight_tested') next.isPublished = false;
       if (next.isPublished && !fw.isPublished) {
         if (next.verification !== 'flight_tested') return reply.code(409).send({ success: false, error: 'not_flight_tested', hint: 'Публикация разрешена только для verification=flight_tested.' });
         if (next.fixesCrashReportId) {
