@@ -1,5 +1,5 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "lib": ["ES2022", "DOM"], "types": ["node", "w3c-web-serial"], "noEmit": true },
+  "compilerOptions": { "lib": ["ES2022", "DOM"], "types": ["node", "w3c-web-serial", "w3c-web-usb"], "noEmit": true },
   "include": ["src"]
 }

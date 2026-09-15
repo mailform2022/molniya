@@ -39,7 +39,7 @@ export class MspClient {
     public readonly transport: Transport,
     opts: MspClientOptions = {}
   ) {
-    this.timeoutMs = opts.timeoutMs ?? 100;
+    this.timeoutMs = opts.timeoutMs ?? 400;
     this.retries = opts.retries ?? 5;
     this.log = opts.log ?? (() => undefined);
     this.parser = new MspParser((m) => this.onMessage(m));

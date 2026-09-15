@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { parseDiff, takeFcSnapshot, type FcSnapshot, type VtxPair } from '@vtx/msp';
 import { Card, Steps, Tip, useAsync } from '../components/ui';
 import { api, apiDownload, apiUpload, ApiError } from '../lib/api';
-import { useFc, webSerialSupported } from '../lib/fc';
+import { connectivityHint, useFc, webSerialSupported } from '../lib/fc';
 import { useStore } from '../lib/store';
 import { TRUST_LABEL, canWrite, snapshotRequired, useWizard, type DiagBuild, type Trust } from '../lib/wizard';
 import { VtxFlow } from './VtxWizard';
@@ -88,9 +88,13 @@ function StepConnect() {
       {fc.info ? (
         <p><span className="badge ok">{fc.info.variant} {fc.info.version}</span> {fc.info.target} · board {fc.info.boardId} · UID <span className="kbd">{fc.info.uid}</span></p>
       ) : (
-        <p className="muted">{webSerialSupported ? 'Нажмите «Подключить» и выберите COM-порт борта.' : 'Web Serial недоступен в этом браузере — используйте Chrome/Edge на ПК или Android (OTG).'}</p>
+        <p className="muted">{webSerialSupported ? 'Нажмите «Подключить» и выберите порт борта.' : connectivityHint()}</p>
+      )}
+      {fc.link === 'lost' && fc.info && (
+        <p className="err">Связь с бортом потеряна (порт закрыт). <button className="secondary" disabled={busy} onClick={() => { setBusy(true); fc.ensureLink().catch((e: Error) => setErr(e.message)).finally(() => setBusy(false)); }}>Переподключить</button></p>
       )}
       {(err ?? fc.error) && <p className="err">{err ?? fc.error}</p>}
+      <p className="muted" style={{ fontSize: 12 }}>{connectivityHint()}</p>
       <div className="row" style={{ marginTop: 10 }}>
         <button disabled={busy || !webSerialSupported} onClick={() => void go(fc.info && !fc.emulated ? undefined : {})}>{fc.info && !fc.emulated ? 'Определить доверие' : 'Подключить'}</button>
         <button className="secondary" disabled={busy} onClick={() => void go({ emulate: true, preset: 'molniya' })}>Эмулятор: Молния (проверенный)</button>
@@ -124,7 +128,9 @@ function StepSnapshot() {
     setBusy(true);
     setProgress([]);
     try {
-      const snap = await takeFcSnapshot(fc.client, (t) => setProgress((p) => [...p, t]));
+      setProgress(['Проверка связи с бортом…']);
+      const client = await fc.ensureLink();
+      const snap = await takeFcSnapshot(client, (t) => setProgress((p) => [...p, t]));
       if (!fc.emulated) {
         setProgress((p) => [...p, 'CLI exit → борт перезагружается, переподключение…']);
         await fc.reconnectAfterReboot();
@@ -593,7 +599,8 @@ function StepCrash() {
     if (!fc.client) return;
     setBusy(true);
     try {
-      const s = await fc.client.cliSession();
+      const client = await fc.ensureLink();
+      const s = await client.cliSession();
       try { setDiffAfter(await s.run('diff all', 8000)); } finally { await s.end('exit'); }
       if (!fc.emulated) await fc.reconnectAfterReboot();
     } catch (e) {

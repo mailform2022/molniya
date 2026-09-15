@@ -56,15 +56,16 @@ export function VtxFlow({ writeAllowed, onDone }: { writeAllowed: { ok: boolean;
     setBusy(true);
     const logStart = fc.log.length;
     try {
+      const client = await fc.ensureLink();
       push('MSP_VTX_CONFIG…');
-      const cfg = await fc.client.vtxConfig();
+      const cfg = await client.vtxConfig();
       setVtxCfg(cfg);
       push(`VTX type=${cfg.deviceType} band=${cfg.band} ch=${cfg.channel} pwr=${cfg.power} freq=${cfg.freqMhz}`);
       if (cfg.deviceType === 0) push('FC сообщает: VTX не сконфигурирован (type=0). Проверьте, что VTX подключён к UART и в INAV выбран SmartAudio/Tramp.');
       push('CLI vtx_info…');
       let parsed: VtxInfo | null = null;
       try {
-        const text = await fc.client.cli('vtx_info', 3000);
+        const text = await client.cli('vtx_info', 3000);
         parsed = parseVtxInfo(text);
         push(`vtx_info: ${parsed.name || '?'} ${parsed.protocol} ${parsed.bands}x${parsed.channels}, ${parsed.freqTable.length} частот`);
       } catch (e) {
@@ -139,11 +140,12 @@ export function VtxFlow({ writeAllowed, onDone }: { writeAllowed: { ok: boolean;
     if (!fc.client || !writeAllowed.ok) return;
     setBusy(true);
     try {
+      const client = await fc.ensureLink();
       push('MSP2 0x2F11 VTX_MAP_WRITE…');
-      await fc.client.vtxMapWrite(pairs);
+      await client.vtxMapWrite(pairs);
       push('MSP_EEPROM_WRITE…');
-      await fc.client.eepromWrite();
-      const back = await fc.client.vtxMapRead();
+      await client.eepromWrite();
+      const back = await client.vtxMapRead();
       const same = back.length === pairs.length && back.every((p, i) => p.band === pairs[i]!.band && p.channel === pairs[i]!.channel && p.freqMhz === pairs[i]!.freqMhz && p.rcChannel === pairs[i]!.rcChannel && p.rcLevel === pairs[i]!.rcLevel);
       push(`Проверка чтением: ${back.length} пар, ${same ? 'совпадает' : 'НЕ совпадает с записанным'}`);
       if (!same) throw new Error('прочитанная карта отличается от записанной');
