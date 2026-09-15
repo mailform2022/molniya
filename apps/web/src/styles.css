@@ -43,3 +43,6 @@ table { width: 100%; border-collapse: collapse; font-size: 14px; } th, td { text
 .tx-screen { background: #101; border: 6px solid #333; border-radius: 10px; padding: 12px; font-family: ui-monospace, monospace; color: #9fe; aspect-ratio: 16/9; }
 .tx-screen.mono { color: #cfe; background: #051; }
 .kbd { background: #ffffff14; padding: 1px 6px; border-radius: 6px; font-family: ui-monospace, monospace; font-size: 12px; }
+nav.tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 12px; }
+nav.tabs a { padding: 6px 10px; border-radius: 10px; color: var(--muted); font-size: 14px; }
+nav.tabs a.active { background: var(--panel2); color: var(--text); }

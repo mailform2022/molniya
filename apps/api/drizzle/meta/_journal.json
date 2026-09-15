@@ -36,6 +36,13 @@
       "when": 1789481690256,
       "tag": "0004_firmware_provenance",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1789488856993,
+      "tag": "0005_snapshot_image_info",
+      "breakpoints": true
     }
   ]
 }

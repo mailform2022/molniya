@@ -13,7 +13,7 @@ import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { schema } from '../db/index.js';
-import { buildArtifacts, validatePairs } from '../lib/artifacts.js';
+import { buildArtifacts, sha256Hex, txYaml, validatePairs } from '../lib/artifacts.js';
 import { classifyTrust } from '../lib/diagnostics.js';
 
 const uuid = z.object({ id: z.string().uuid() });
@@ -49,6 +49,14 @@ export const buildSetRoutes: FastifyPluginAsyncZod = async (app) => {
   app.addHook('preHandler', app.authenticate);
 
   const own = (id: string, userId: string) => and(eq(schema.buildSets.id, id), eq(schema.buildSets.userId, userId));
+
+  /** Transmitter-only artifact: EdgeTX VtxAuto YAML from pairs, no FC / snapshot involved (the radio section works without a board). */
+  app.post('/transmitter/yaml', { schema: { body: z.object({ pairs: z.array(pairSchema).min(1).max(16), name: z.string().max(64).default('VTX') }) } }, async (req, reply) => {
+    const pairErr = validatePairs(req.body.pairs);
+    if (pairErr) return reply.code(400).send({ success: false, error: 'invalid_pairs', hint: pairErr });
+    const yaml = txYaml(req.body.pairs, req.body.name);
+    return { success: true, yaml, sha256: sha256Hex(yaml) };
+  });
 
   app.post('/build-sets', { preHandler: app.requireRole(['operator', 'technician']), schema: { body: createBody } }, async (req, reply) => {
     const b = req.body;

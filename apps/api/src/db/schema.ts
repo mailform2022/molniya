@@ -264,6 +264,8 @@ export const boardSnapshots = pgTable(
     imageSha256: varchar('image_sha256', { length: 64 }),
     imageSizeBytes: integer('image_size_bytes'),
     imageSource: varchar('image_source', { length: 32 }), // dfu-util | stm32cubeprog | st-link | other
+    /** static analysis of the dump (build strings, config sector, warnings) — see @vtx/msp analyzeFirmwareImage */
+    imageInfo: jsonb('image_info').$type<Record<string, unknown>>(),
     note: text('note'),
     createdAt: createdAt()
   },

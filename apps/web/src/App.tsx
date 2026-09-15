@@ -6,21 +6,22 @@ import { AdminLayout } from './admin/AdminLayout';
 import { AccountPage } from './pages/Account';
 import { AuthPage } from './pages/Auth';
 import { AutoFlashPage } from './pages/AutoFlash';
+import { BoardPage } from './pages/Board';
 import { ConnectPage } from './pages/Connect';
 import { DiffPage } from './pages/Diff';
 import { EmulatorsPage } from './pages/Emulators';
 import { HomePage } from './pages/Home';
 import { NewsPage } from './pages/News';
 import { SubmitPage } from './pages/Submit';
+import { TransmitterPage } from './pages/Transmitter';
 import { VtxWizardPage } from './pages/VtxWizard';
 import { WizardPage } from './pages/Wizard';
 
 const NAV = [
   ['/wizard', 'Мастер'],
-  ['/connect', 'Борт'],
+  ['/board', 'Борт'],
   ['/vtx', 'VTX'],
-  ['/autoflash', 'Прошивка'],
-  ['/diff', 'Diff'],
+  ['/transmitter', 'Пульт'],
   ['/emulators', 'Эмуляторы'],
   ['/news', 'Новости'],
   ['/account', 'Кабинет']
@@ -81,8 +82,10 @@ export function App() {
           <Route path="/" element={<HomePage />} />
           <Route path="/auth" element={<AuthPage />} />
           <Route path="/connect" element={<ConnectPage />} />
+          <Route path="/board/*" element={<Protected><BoardPage /></Protected>} />
           <Route path="/wizard" element={<Protected><WizardPage /></Protected>} />
           <Route path="/vtx" element={<Protected><VtxWizardPage /></Protected>} />
+          <Route path="/transmitter" element={<Protected><TransmitterPage /></Protected>} />
           <Route path="/autoflash" element={<Protected><AutoFlashPage /></Protected>} />
           <Route path="/diff" element={<Protected><DiffPage /></Protected>} />
           <Route path="/diff/shared/:token" element={<DiffPage />} />

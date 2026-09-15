@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
-import { parseDiff } from '@vtx/msp';
+import { analyzeFirmwareImage, imageMatchesBoard, parseDiff } from '@vtx/msp';
 import { schema } from '../db/index.js';
 import { analyzeCrash, buildDiagnosticScript, classifyTrust, type CrashFile } from '../lib/diagnostics.js';
 import { env } from '../lib/env.js';
@@ -92,12 +92,20 @@ export const diagnosticsRoutes: FastifyPluginAsyncZod = async (app) => {
       else if (part.fieldname === 'source') source = String(part.value).slice(0, 32);
     }
     if (!file || file.buf.length < 1024) return reply.code(400).send({ success: false, error: 'image_required' });
+    const info = analyzeFirmwareImage(new Uint8Array(file.buf.buffer, file.buf.byteOffset, file.buf.byteLength));
+    if (!info.vectorTableOk) return reply.code(400).send({ success: false, error: 'not_a_flash_dump', hint: info.warnings.join(' ') });
+    const mismatch = imageMatchesBoard(info, { target: s.fcTarget, version: s.fcVersion, variant: s.fcVariant });
+    if (mismatch.length) return reply.code(409).send({ success: false, error: 'image_board_mismatch', hint: `Дамп не от этого борта: ${mismatch.join('; ')}` });
     const dir = path.join(env.UPLOAD_DIR, 'snapshots', s.id);
     await mkdir(dir, { recursive: true });
     const imagePath = path.join(dir, safeName(file.name));
     await writeFile(imagePath, file.buf);
-    await app.db.update(schema.boardSnapshots).set({ imagePath, imageSha256: sha(file.buf), imageSizeBytes: file.buf.length, imageSource: source }).where(eq(schema.boardSnapshots.id, s.id));
-    return { success: true, sha256: sha(file.buf), sizeBytes: file.buf.length };
+    const imageInfo = { ...info, regions: info.regions.map((r) => ({ start: r.start, end: r.end })) };
+    await app.db
+      .update(schema.boardSnapshots)
+      .set({ imagePath, imageSha256: sha(file.buf), imageSizeBytes: file.buf.length, imageSource: source, imageInfo })
+      .where(eq(schema.boardSnapshots.id, s.id));
+    return { success: true, sha256: sha(file.buf), sizeBytes: file.buf.length, info };
   });
 
   app.post(
